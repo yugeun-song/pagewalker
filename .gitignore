@@ -1,0 +1,23 @@
+# Build Outputs
+bin/
+
+# Kernel Build Artifacts
+kernel/*.o
+kernel/*.ko
+kernel/*.mod.c
+kernel/*.mod
+kernel/*.order
+kernel/*.symvers
+kernel/.*.cmd
+kernel/.tmp_versions/
+
+# User Build Artifacts
+user/pagewalker
+user/*.o
+
+# Neovim / LSP Artifacts
+kernel/compile_flags.txt
+
+# OS Generated
+.DS_Store
+Thumbs.db
