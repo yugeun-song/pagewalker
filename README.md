@@ -52,15 +52,14 @@ sudo ./bin/user/pagewalker [OPTIONS] <PID> <VIRTUAL_ADDRESS>
 
 **1. Inspect a specific address in a shell:**
 ```bash
-sudo ./bin/user/pagewalker 1234 0x55a1b2c3d000
+sudo ./bin/user/pagewalker 4192 0x55a1b2c3d000
 ```
 
 **2. Handling Errors (Invalid Input):**
 ```bash
-sudo ./bin/user/pagewalker -1 0x1234
-```text
-Error: PID -1 is invalid.
-Hint : PID must be a positive integer.
+sudo ./bin/user/pagewalker -1 0x0123456789abcdef
+# Error: PID -1 is invalid.
+# Hint : PID must be a positive integer.
 ```
 
 ## Custom Integration
