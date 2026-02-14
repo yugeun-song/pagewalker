@@ -13,16 +13,17 @@
 
 #include "../include/pagewalk_common.h"
 
-/* --- Constants --- */
 #define MASK_CANONICAL_48      0xFFFF000000000000ULL
 #define MASK_CANONICAL_57      0xFE00000000000000ULL
 #define SHIFT_SIGN_BIT_48      47
 #define SHIFT_SIGN_BIT_57      56
 #define RET_SUCCESS            0
 #define BIT_IS_SET             1
+#define NOT_VALID              0
+
 
 MODULE_DESCRIPTION("x86-64 Page Table Walker with Phys Verification");
-MODULE_AUTHOR("ArchGeek");
+MODULE_AUTHOR("Yugeun Song");
 MODULE_LICENSE("GPL");
 
 static long pagewalk_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
@@ -43,7 +44,7 @@ static unsigned long get_phys_mask(void)
 	return PHYSICAL_PAGE_MASK;
 }
 
-static int is_canonical_address(unsigned long vaddr, int levels)
+static int is_canonical_address(unsigned long vaddr, int paging_level)
 {
 	unsigned long sign_bit;
 	unsigned long upper_bits;
@@ -51,7 +52,7 @@ static int is_canonical_address(unsigned long vaddr, int levels)
 	unsigned long shift;
 
 #ifdef CONFIG_X86_5LEVEL
-	if (levels == PAGING_LEVEL_5) {
+	if (paging_level == PAGING_LEVEL_5) {
 		shift = SHIFT_SIGN_BIT_57;
 		mask = MASK_CANONICAL_57;
 	} else {
@@ -68,36 +69,40 @@ static int is_canonical_address(unsigned long vaddr, int levels)
 
 	if (sign_bit)
 		return (upper_bits == mask);
-	else
-		return (upper_bits == 0);
+	return (upper_bits == 0);
 }
 
-/* * Safe Physical Memory Reader 
- * Uses direct mapping (phys_to_virt) and handles faults.
+/*
+ * Safe Physical Memory Reader
+ * Validates memory presence and performs fault-tolerant reading.
  */
 static void read_physical_content(struct pagewalk_result *res)
 {
 	void *kaddr;
 	unsigned long val = 0;
-	
-	/* 1. Validate if PFN is valid system RAM */
+
+	/*
+	 * 1. Validate if PFN is valid system RAM.
+	 * Even if the address exists in the page table, we must ensure
+	 * it's backed by actual RAM (not MMIO or reserved holes) to
+	 * avoid system instability.
+	 */
 	if (!pfn_valid(res->page_base_phys >> PAGE_SHIFT)) {
-		/* If it's MMIO or invalid PFN, reading might hang or crash. 
-		 * We skip reading for safety unless we map it differently. */
-		res->value_at_phys = 0xDEADBEEFDEADBEEF; 
+		res->value_at_phys = 0xffffffffffffffff;
 		return;
 	}
 
 	/* 2. Get Kernel Virtual Address (Direct Mapping) */
 	kaddr = phys_to_virt(res->final_phys_addr);
 
-	/* 3. Read Safely (Prevents Kernel Panic on bad access) */
-	/* copy_from_kernel_nofault works like probe_kernel_read */
-	if (copy_from_kernel_nofault(&val, kaddr, sizeof(unsigned long))) {
-		res->value_at_phys = 0xFFFFFFFFFFFFFFFF; /* Fault Indicator */
-	} else {
-		res->value_at_phys = val;
-	}
+	/*
+	 * 3. Perform Fault-Tolerant Read.
+	 * We use copy_from_kernel_nofault() to safely probe the address.
+	 * This prevents a Kernel Panic by catching potential page faults
+	 * or access violations internally.
+	 */
+	res->value_at_phys = 0xffffffffffffffff;
+	copy_from_kernel_nofault(&res->value_at_phys, kaddr, sizeof(val));
 }
 
 static int perform_page_walk(pid_t pid, struct pagewalk_result *res)
@@ -118,26 +123,29 @@ static int perform_page_walk(pid_t pid, struct pagewalk_result *res)
 		return -EINVAL;
 
 	pid_struct = find_get_pid(pid);
-	if (!pid_struct) return -ESRCH;
+	if (!pid_struct)
+		return -ESRCH;
 
 	task = get_pid_task(pid_struct, PIDTYPE_PID);
 	put_pid(pid_struct);
-	if (!task) return -ESRCH;
+	if (!task)
+		return -ESRCH;
 
 	mm = get_task_mm(task);
 	put_task_struct(task);
-	if (!mm) return -EINVAL;
+	if (!mm)
+		return -EINVAL;
 
 	if (!mmap_read_trylock(mm))
 		mmap_read_lock(mm);
 
 #ifdef CONFIG_X86_5LEVEL
-	res->levels = pgtable_l5_enabled() ? PAGING_LEVEL_5 : PAGING_LEVEL_4;
+	res->paging_level = pgtable_l5_enabled() ? PAGING_LEVEL_5 : PAGING_LEVEL_4;
 #else
-	res->levels = PAGING_LEVEL_4;
+	res->paging_level = PAGING_LEVEL_4;
 #endif
 
-	if (!is_canonical_address(vaddr, res->levels)) {
+	if (!is_canonical_address(vaddr, res->paging_level)) {
 		ret = -EADDRNOTAVAIL;
 		goto out_unlock;
 	}
@@ -149,31 +157,34 @@ static int perform_page_walk(pid_t pid, struct pagewalk_result *res)
 	res->pgd_base_phys = virt_to_phys(mm->pgd);
 	res->pgd_val = pgd_val(*pgd);
 
-	if (pgd_none(*pgd) || pgd_bad(*pgd)) goto out_unlock;
+	if (pgd_none(*pgd) || pgd_bad(*pgd))
+		goto out_unlock;
 
 	res->p4d_idx = p4d_index(vaddr);
 	p4d = p4d_offset(pgd, vaddr);
-	if (res->levels == PAGING_LEVEL_5)
+	if (res->paging_level == PAGING_LEVEL_5)
 		res->p4d_base_phys = pgd_val(*pgd) & phys_mask;
 	else
 		res->p4d_base_phys = res->pgd_base_phys;
 	res->p4d_val = p4d_val(*p4d);
 
-	if (p4d_none(*p4d) || p4d_bad(*p4d)) goto out_unlock;
+	if (p4d_none(*p4d) || p4d_bad(*p4d))
+		goto out_unlock;
 
 	res->pud_idx = pud_index(vaddr);
 	pud = pud_offset(p4d, vaddr);
 	res->pud_base_phys = p4d_val(*p4d) & phys_mask;
 	res->pud_val = pud_val(*pud);
 
-	if (pud_none(*pud) || pud_bad(*pud)) goto out_unlock;
-	
+	if (pud_none(*pud) || pud_bad(*pud))
+		goto out_unlock;
+
 	if (pud_leaf(*pud)) {
 		res->page_base_phys = (pud_val(*pud) & phys_mask);
 		res->final_phys_addr = res->page_base_phys + (vaddr & ~PUD_MASK);
-		res->valid = BIT_IS_SET;
-		read_physical_content(res); /* Verify */
-		goto out_unlock; 
+		res->is_valid = BIT_IS_SET;
+		read_physical_content(res);
+		goto out_unlock;
 	}
 
 	res->pmd_idx = pmd_index(vaddr);
@@ -181,13 +192,14 @@ static int perform_page_walk(pid_t pid, struct pagewalk_result *res)
 	res->pmd_base_phys = pud_val(*pud) & phys_mask;
 	res->pmd_val = pmd_val(*pmd);
 
-	if (pmd_none(*pmd) || pmd_bad(*pmd)) goto out_unlock;
+	if (pmd_none(*pmd) || pmd_bad(*pmd))
+		goto out_unlock;
 
 	if (pmd_leaf(*pmd)) {
 		res->page_base_phys = (pmd_val(*pmd) & phys_mask);
 		res->final_phys_addr = res->page_base_phys + (vaddr & ~PMD_MASK);
-		res->valid = BIT_IS_SET;
-		read_physical_content(res); /* Verify */
+		res->is_valid = BIT_IS_SET;
+		read_physical_content(res);
 		goto out_unlock;
 	}
 
@@ -196,14 +208,15 @@ static int perform_page_walk(pid_t pid, struct pagewalk_result *res)
 	res->pte_base_phys = pmd_val(*pmd) & phys_mask;
 	res->pte_val = pte_val(*pte);
 
-	if (pte_none(*pte)) goto out_unlock;
+	if (pte_none(*pte))
+		goto out_unlock;
 
 	res->page_offset = vaddr & ~PAGE_MASK;
 	res->page_base_phys = pte_pfn(*pte) << PAGE_SHIFT;
 	res->final_phys_addr = res->page_base_phys | res->page_offset;
-	res->valid = BIT_IS_SET;
-	
-	read_physical_content(res); /* Verify */
+	res->is_valid = BIT_IS_SET;
+
+	read_physical_content(res);
 
 out_unlock:
 	mmap_read_unlock(mm);
@@ -217,26 +230,29 @@ static long pagewalk_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 	int ret;
 	__u64 saved_vaddr;
 
-	if (cmd != PAGEWALK_IOC_GET_INFO) return -ENOTTY;
-	if (copy_from_user(&req, (void __user *)arg, sizeof(req))) return -EFAULT;
+	if (cmd != PAGEWALK_IOC_GET_INFO)
+		return -ENOTTY;
+	if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+		return -EFAULT;
 
 	saved_vaddr = req.info.target_vaddr;
 	memset(&req.info, 0, sizeof(req.info));
 	req.info.target_vaddr = saved_vaddr;
 
 	ret = perform_page_walk(req.pid, &req.info);
-	
 	if (ret < 0) {
 		if (ret == -EINVAL || ret == -ESRCH || ret == -EADDRNOTAVAIL)
 			return ret;
-		req.info.valid = 0;
+		req.info.is_valid = NOT_VALID;
 	}
 
-	if (copy_to_user((void __user *)arg, &req, sizeof(req))) return -EFAULT;
+	if (copy_to_user((void __user *)arg, &req, sizeof(req)))
+		return -EFAULT;
 	return RET_SUCCESS;
 }
 
-static int __init pagewalk_init(void) {
+static int __init pagewalk_init(void)
+{
 	if (misc_register(&pagewalk_device)) {
 		pr_err("pagewalk: failed to register misc device\n");
 		return -1;
@@ -244,7 +260,8 @@ static int __init pagewalk_init(void) {
 	return 0;
 }
 
-static void __exit pagewalk_exit(void) {
+static void __exit pagewalk_exit(void)
+{
 	misc_deregister(&pagewalk_device);
 }
 
