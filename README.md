@@ -92,8 +92,8 @@ unsigned long long get_physical_address(int pid, unsigned long long vaddr)
 
     close(fd);
 
-    if (req.info.isValid) {
-        /* You can also access raw entries like req.info.pgd_val, etc. */
+    if (req.info.is_valid) {
+        /* You can also access raw entries like 'req.info.pgd_val', etc. */
         return req.info.final_phys_addr;
     }
 
