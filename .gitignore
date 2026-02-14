@@ -1,7 +1,11 @@
-# Build Outputs
+tags
+.tags*
+.netrw*
+*.swp
+*.swo
+
 bin/
 
-# Kernel Build Artifacts
 kernel/*.o
 kernel/*.ko
 kernel/*.mod.c
@@ -10,14 +14,21 @@ kernel/*.order
 kernel/*.symvers
 kernel/.*.cmd
 kernel/.tmp_versions/
+kernel/modules.order
+kernel/Module.symvers
+kernel/*.o.d
 
-# User Build Artifacts
 user/pagewalker
 user/*.o
+user/*.d
 
-# Neovim / LSP Artifacts
 kernel/compile_flags.txt
 
-# OS Generated
+cscope.files
+cscope.out
+cscope.in.out
+cscope.po.out
+
 .DS_Store
 Thumbs.db
+*~
