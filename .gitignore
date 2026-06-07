@@ -4,6 +4,9 @@ tags
 *.swp
 *.swo
 
+# local clangd/LSP config (kernel-tree specific, not portable)
+.clangd
+
 kernel/*.o
 kernel/*.ko
 kernel/*.mod.c
