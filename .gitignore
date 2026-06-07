@@ -4,8 +4,6 @@ tags
 *.swp
 *.swo
 
-bin/
-
 kernel/*.o
 kernel/*.ko
 kernel/*.mod.c
@@ -18,7 +16,7 @@ kernel/modules.order
 kernel/Module.symvers
 kernel/*.o.d
 
-user/pagewalker
+user/pagewalkerctl
 user/*.o
 user/*.d
 

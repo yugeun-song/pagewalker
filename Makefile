@@ -1,10 +1,6 @@
-.PHONY: all clean tags cscope user kernel bin_dir
+.PHONY: all clean tags cscope user kernel
 
-all: bin_dir kernel user tags cscope
-
-bin_dir:
-	mkdir -p bin/kernel
-	mkdir -p bin/user
+all: kernel user tags cscope
 
 kernel:
 	$(MAKE) -C kernel
@@ -22,5 +18,4 @@ cscope:
 clean:
 	$(MAKE) -C kernel clean
 	$(MAKE) -C user clean
-	rm -rf bin/
 	rm -f tags cscope.out cscope.in.out cscope.po.out cscope.files
