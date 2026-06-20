@@ -4,8 +4,9 @@ tags
 *.swp
 *.swo
 
-# local clangd/LSP config (kernel-tree specific, not portable)
+# local clangd/LSP config + generated compile DB (kernel-tree specific, not portable)
 .clangd
+compile_commands.json
 
 kernel/*.o
 kernel/*.ko
@@ -20,6 +21,7 @@ kernel/Module.symvers
 kernel/*.o.d
 
 user/pagewalkerctl
+user/selftest
 user/*.o
 user/*.d
 

@@ -8,6 +8,7 @@
 #define PAGEWALKER_PATH        "/dev/pagewalker"
 #define PAGEWALKER_IOC_MAGIC   'k'
 #define PAGEWALKER_CMD_ID      1
+#define PAGING_LEVEL_3       3
 #define PAGING_LEVEL_4       4
 #define PAGING_LEVEL_5       5
 
@@ -15,7 +16,23 @@ struct pagewalker_result {
 	__u64 target_vaddr;
 
 	int paging_level;
-	__u64 cr3_phys;
+
+	/*
+	 * Geometry the kernel detected at runtime, so the CLI can render the
+	 * address-field breakdown for any arch/granule without hardcoding it:
+	 * page_shift is log2(page size) (12/14/16), va_bits is the translated
+	 * virtual-address width (x86 48/57, arm64 vabits_actual, riscv Sv39/48/57).
+	 */
+	__u32 page_shift;
+	__u32 va_bits;
+
+	/*
+	 * Physical base of the root page table - the value programmed into the
+	 * arch's root translation register: CR3 (x86-64), TTBR0_EL1 (arm64, the
+	 * user half; TTBR1_EL1 holds the kernel half), or satp.PPN<<PAGE_SHIFT
+	 * (riscv). Equal to virt_to_phys(mm->pgd) on every arch.
+	 */
+	__u64 root_table_phys;
 
 	__u64 pgd_idx;
 	__u64 p4d_idx;

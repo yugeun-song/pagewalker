@@ -13,21 +13,142 @@
 #include <linux/pfn.h>
 #include <linux/pgtable.h>
 #include <linux/io.h>
+#include <linux/bits.h>
 #include <linux/threads.h>
 
 #include "../include/pagewalker_common.h"
 
-#define MASK_CANONICAL_48      0xFFFF000000000000ULL
-#define MASK_CANONICAL_57      0xFE00000000000000ULL
-#define SHIFT_SIGN_BIT_48      47
-#define SHIFT_SIGN_BIT_57      56
 #define RET_SUCCESS            0
 #define BIT_IS_SET             1
+#define ENTRY_SIZE             8	/* page-table entry is 8 bytes on every 64-bit arch */
 
 
-MODULE_DESCRIPTION("x86-64 Page Table Walker with Phys Verification");
+MODULE_DESCRIPTION("Page Table Walker with Phys Verification (x86-64/arm64/riscv64)");
 MODULE_AUTHOR("Yugeun Song");
 MODULE_LICENSE("GPL");
+
+/* ------------------------------------------------------------------------- *
+ * Architecture layer
+ *
+ * The walk itself (perform_page_walk) is architecture-neutral: it is driven by
+ * the generic pgd/p4d/pud/pmd/pte accessors and the typed getters, which fold
+ * the absent levels transparently on every arch. Only four facts are hardware-
+ * defined, so they are the only things isolated per arch here:
+ *   - arch_paging_level()          how many levels are active (3 / 4 / 5)
+ *   - arch_va_bits()               translated virtual-address width
+ *   - arch_entry_to_table_phys()   entry value -> next table's physical base
+ *   - arch_addr_representable()    which virtual addresses can be translated
+ * Everything else below the arch layer is shared source.
+ * ------------------------------------------------------------------------- */
+
+#if defined(CONFIG_X86_64)
+
+static int arch_paging_level(void)
+{
+	return pgtable_l5_enabled() ? PAGING_LEVEL_5 : PAGING_LEVEL_4;
+}
+
+static unsigned int arch_va_bits(void)
+{
+	return pgtable_l5_enabled() ? 57 : 48;
+}
+
+static u64 arch_entry_to_table_phys(u64 entry_val)
+{
+	/* The next-table physical base sits in place in the entry; mask it out. */
+	return entry_val & PHYSICAL_PAGE_MASK;
+}
+
+#elif defined(CONFIG_ARM64)
+
+static int arch_paging_level(void)
+{
+	/*
+	 * With CONFIG_ARM64_LPA2 the top levels are enabled at runtime; otherwise
+	 * the level count is fixed by CONFIG_PGTABLE_LEVELS. The runtime checks
+	 * cover both: they fall through to the compile-time count when LPA2 is off.
+	 */
+	if (pgtable_l5_enabled())
+		return PAGING_LEVEL_5;
+	if (pgtable_l4_enabled())
+		return PAGING_LEVEL_4;
+	return CONFIG_PGTABLE_LEVELS;
+}
+
+static unsigned int arch_va_bits(void)
+{
+	/* vabits_actual reads TCR_EL1 at runtime for 52-bit configs, else VA_BITS. */
+	return (unsigned int)vabits_actual;
+}
+
+static u64 arch_entry_to_table_phys(u64 entry_val)
+{
+	/* __pte_to_phys reassembles the relocated high PA bits under LPA2. */
+	return __pte_to_phys(__pte(entry_val));
+}
+
+#elif defined(CONFIG_RISCV) && defined(CONFIG_64BIT)
+
+/* RV64 stores a 44-bit PPN in PTE bits [53:10]; the flags live in bits [9:0]. */
+#define PW_RISCV_PFN_MASK GENMASK_ULL(53, 10)
+
+static int arch_paging_level(void)
+{
+	/* pgtable_l4_enabled / pgtable_l5_enabled are bare bool variables here. */
+	if (pgtable_l5_enabled)
+		return PAGING_LEVEL_5;
+	if (pgtable_l4_enabled)
+		return PAGING_LEVEL_4;
+	return PAGING_LEVEL_3;		/* Sv39 */
+}
+
+static unsigned int arch_va_bits(void)
+{
+	return (unsigned int)VA_BITS;	/* Sv39/48/57 selected at runtime */
+}
+
+static u64 arch_entry_to_table_phys(u64 entry_val)
+{
+	return ((entry_val & PW_RISCV_PFN_MASK) >> _PAGE_PFN_SHIFT) << PAGE_SHIFT;
+}
+
+#else
+#error "pagewalker: unsupported architecture (need x86-64, arm64, or riscv64)"
+#endif
+
+/*
+ * Is this virtual address translatable on this arch? x86-64 and riscv64 both
+ * sign-extend (the bits above the sign bit must all equal it), only at a
+ * different position (x86 47/56; riscv Sv39/48/57 -> bit 38/47/56). arm64 has
+ * no two-sided canonical hole: a user address is strictly the low half, and a
+ * top-byte tag (TBI) must be stripped before the range check.
+ */
+static bool arch_addr_representable(unsigned long vaddr, unsigned int va_bits)
+{
+#if defined(CONFIG_ARM64)
+	return (untagged_addr(vaddr) >> va_bits) == 0;
+#else
+	unsigned long mask = ~((1UL << va_bits) - 1);	/* bits [va_bits, 63] */
+	unsigned long sign_bit = (vaddr >> (va_bits - 1)) & 1;
+	unsigned long upper = vaddr & mask;
+
+	return sign_bit ? (upper == mask) : (upper == 0);
+#endif
+}
+
+/*
+ * Is a leaf entry actually resident? Mirrors pte_present(): a present or
+ * PROT_NONE/NUMA entry maps real RAM, while a swap/migration entry does not.
+ * This is portable - pte_present() on a reconstructed entry classifies a huge
+ * leaf correctly on every arch (the present/valid bit is bit 0 everywhere, and
+ * each arch keeps the relevant bits clear in its swap-entry encoding). It is
+ * used instead of pmd_present()/pud_present() only so one expression serves all
+ * three arches uniformly.
+ */
+static bool entry_present(u64 entry_val)
+{
+	return pte_present(__pte(entry_val));
+}
 
 static long pagewalker_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 
@@ -42,39 +163,6 @@ static struct miscdevice pagewalker_device = {
 	.fops = &pagewalker_fops,
 };
 
-static unsigned long get_phys_mask(void)
-{
-	return PHYSICAL_PAGE_MASK;
-}
-
-static int is_canonical_address(unsigned long vaddr, int paging_level)
-{
-	unsigned long sign_bit;
-	unsigned long upper_bits;
-	unsigned long mask;
-	unsigned long shift;
-
-	/*
-	 * 5-level (LA57) support is gated at runtime via pgtable_l5_enabled(),
-	 * not by a compile-time macro: the kernel decides 4- vs 5-level at boot,
-	 * so the mask/shift must follow the detected paging_level.
-	 */
-	if (paging_level == PAGING_LEVEL_5) {
-		shift = SHIFT_SIGN_BIT_57;
-		mask = MASK_CANONICAL_57;
-	} else {
-		shift = SHIFT_SIGN_BIT_48;
-		mask = MASK_CANONICAL_48;
-	}
-
-	sign_bit = (vaddr >> shift) & 1;
-	upper_bits = vaddr & mask;
-
-	if (sign_bit)
-		return (upper_bits == mask);
-	return (upper_bits == 0);
-}
-
 /*
  * Safe Physical Memory Reader
  * Validates memory presence and performs fault-tolerant reading.
@@ -87,7 +175,7 @@ static void read_physical_content(struct pagewalker_result *res)
 	/*
 	 * pfn_valid() only confirms a struct page / memmap entry exists for the
 	 * frame. It does NOT prove the frame is usable RAM (it may be a reserved
-	 * E820 region or a hole inside an otherwise-present section). The actual
+	 * region or a hole inside an otherwise-present section). The actual
 	 * fault-safety comes from copy_from_kernel_nofault() below, which catches
 	 * a bad access instead of panicking. We validate the EXACT pfn we read
 	 * (final_phys_addr), which for a huge page differs from the page base.
@@ -113,7 +201,9 @@ static void read_physical_content(struct pagewalker_result *res)
  * slot (base + index * 8) via the direct map. This confirms the physical
  * address the tool reports really holds the value the walk obtained through
  * the page-table pointer. copy_from_kernel_nofault() keeps a bad / faulting
- * slot from panicking; the sentinel then shows up as a mismatch.
+ * slot from panicking; the sentinel then shows up as a mismatch. Page-table
+ * pages are in the linear map on every 64-bit arch (no highmem), so
+ * phys_to_virt() is valid here.
  */
 static u64 read_entry_phys(unsigned long slot_phys)
 {
@@ -143,7 +233,6 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	pte_t pte_entry;
 	spinlock_t *ptl;
 	unsigned long vaddr = res->target_vaddr;
-	unsigned long phys_mask = get_phys_mask();
 	const char *reason = "incomplete walk";
 
 	/* Validate the request before acquiring any process resources. */
@@ -152,8 +241,11 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 		return -EINVAL;
 	}
 
-	res->paging_level = pgtable_l5_enabled() ? PAGING_LEVEL_5 : PAGING_LEVEL_4;
-	if (!is_canonical_address(vaddr, res->paging_level)) {
+	res->paging_level = arch_paging_level();
+	res->page_shift = PAGE_SHIFT;
+	res->va_bits = arch_va_bits();
+
+	if (!arch_addr_representable(vaddr, res->va_bits)) {
 		pr_info_ratelimited("pid %d vaddr 0x%lx: rejected (non-canonical address)\n",
 				    pid, vaddr);
 		return -EADDRNOTAVAIL;
@@ -181,14 +273,18 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 
 	mmap_read_lock(mm);
 
-	res->cr3_phys = virt_to_phys(mm->pgd);
+	/*
+	 * Root page-table base = the value programmed into the arch root
+	 * translation register (CR3 / TTBR0_EL1 / satp.PPN<<PAGE_SHIFT).
+	 */
+	res->root_table_phys = virt_to_phys(mm->pgd);
 
 	res->pgd_idx = pgd_index(vaddr);
 	pgd = pgd_offset(mm, vaddr);
 	pgde = pgdp_get(pgd);
 	res->pgd_base_phys = virt_to_phys(mm->pgd);
 	res->pgd_val = pgd_val(pgde);
-	res->pgd_readback = read_entry_phys(res->pgd_base_phys + res->pgd_idx * 8);
+	res->pgd_readback = read_entry_phys(res->pgd_base_phys + res->pgd_idx * ENTRY_SIZE);
 
 	if (pgd_none(pgde) || pgd_bad(pgde)) {
 		reason = "PGD entry empty or bad";
@@ -198,12 +294,17 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	res->p4d_idx = p4d_index(vaddr);
 	p4d = p4d_offset(pgd, vaddr);
 	p4de = p4dp_get(p4d);
+	/*
+	 * For a hardware-present level the next table base comes from the entry;
+	 * for a folded level the accessor returns the parent slot, so reuse the
+	 * parent's base (its index, here 0, is added separately at read-back).
+	 */
 	if (res->paging_level == PAGING_LEVEL_5)
-		res->p4d_base_phys = pgd_val(pgde) & phys_mask;
+		res->p4d_base_phys = arch_entry_to_table_phys(pgd_val(pgde));
 	else
 		res->p4d_base_phys = res->pgd_base_phys;
 	res->p4d_val = p4d_val(p4de);
-	res->p4d_readback = read_entry_phys(res->p4d_base_phys + res->p4d_idx * 8);
+	res->p4d_readback = read_entry_phys(res->p4d_base_phys + res->p4d_idx * ENTRY_SIZE);
 
 	if (p4d_none(p4de) || p4d_bad(p4de)) {
 		reason = "P4D entry empty or bad";
@@ -213,9 +314,9 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	res->pud_idx = pud_index(vaddr);
 	pud = pud_offset(p4d, vaddr);
 	pude = pudp_get(pud);
-	res->pud_base_phys = p4d_val(p4de) & phys_mask;
+	res->pud_base_phys = arch_entry_to_table_phys(p4d_val(p4de));
 	res->pud_val = pud_val(pude);
-	res->pud_readback = read_entry_phys(res->pud_base_phys + res->pud_idx * 8);
+	res->pud_readback = read_entry_phys(res->pud_base_phys + res->pud_idx * ENTRY_SIZE);
 
 	if (pud_none(pude)) {
 		reason = "PUD entry empty";
@@ -224,13 +325,12 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 
 	if (pud_leaf(pude)) {
 		/*
-		 * pud_leaf() only tests _PAGE_PSE. Mirror pte_present() and gate on
-		 * _PAGE_PRESENT | _PAGE_PROTNONE: this rejects a mid-split, swapped
-		 * or migrating huge entry (PSE set, both bits clear) while keeping a
-		 * resident PROT_NONE / NUMA-balancing huge page valid. pud_present()
-		 * is unusable here: it counts _PAGE_PSE itself as present.
+		 * pud_leaf() reports a 1G mapping but says nothing about residency.
+		 * Gate on entry_present() (a pte_present() mirror) so a swapped or
+		 * migrating huge entry is rejected while a resident PROT_NONE / NUMA-
+		 * balancing huge page stays valid.
 		 */
-		if (!(pud_val(pude) & (_PAGE_PRESENT | _PAGE_PROTNONE))) {
+		if (!entry_present(pud_val(pude))) {
 			reason = "1G huge entry not present (swap/migration)";
 			goto out_unlock;
 		}
@@ -251,9 +351,9 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	res->pmd_idx = pmd_index(vaddr);
 	pmd = pmd_offset(pud, vaddr);
 	pmde = pmdp_get_lockless(pmd);
-	res->pmd_base_phys = pud_val(pude) & phys_mask;
+	res->pmd_base_phys = arch_entry_to_table_phys(pud_val(pude));
 	res->pmd_val = pmd_val(pmde);
-	res->pmd_readback = read_entry_phys(res->pmd_base_phys + res->pmd_idx * 8);
+	res->pmd_readback = read_entry_phys(res->pmd_base_phys + res->pmd_idx * ENTRY_SIZE);
 
 	if (pmd_none(pmde)) {
 		reason = "PMD entry empty";
@@ -262,7 +362,7 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 
 	if (pmd_leaf(pmde)) {
 		/* See the pud_leaf() note: present|protnone, mirroring pte_present(). */
-		if (!(pmd_val(pmde) & (_PAGE_PRESENT | _PAGE_PROTNONE))) {
+		if (!entry_present(pmd_val(pmde))) {
 			reason = "2M huge entry not present (swap/migration)";
 			goto out_unlock;
 		}
@@ -281,7 +381,7 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	}
 
 	res->pte_idx = pte_index(vaddr);
-	res->pte_base_phys = pmd_val(pmde) & phys_mask;
+	res->pte_base_phys = arch_entry_to_table_phys(pmd_val(pmde));
 
 	/*
 	 * The PTE table can be retracted under us by khugepaged / MADV_COLLAPSE,
@@ -291,8 +391,8 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	 * pte_offset_map_lock's PTE-page ptl, but collapse clears the pmd via
 	 * pmdp_collapse_flush() while holding exactly this lock, so holding it and
 	 * re-validating the pmd blocks the clear that would detach the PTE page.
-	 * We snapshot the entry, then drop the lock. x86-64 has no highmem, so
-	 * pte_offset_kernel() needs no kmap.
+	 * We snapshot the entry, then drop the lock. 64-bit arches have no highmem,
+	 * so pte_offset_kernel() needs no kmap.
 	 */
 	ptl = pmd_lock(mm, pmd);
 	pmde = pmdp_get(pmd);
@@ -304,7 +404,7 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	pte = pte_offset_kernel(pmd, vaddr);
 	pte_entry = ptep_get(pte);
 	/* Read back the PTE slot while still holding the lock that pins the table. */
-	res->pte_readback = read_entry_phys(res->pte_base_phys + res->pte_idx * 8);
+	res->pte_readback = read_entry_phys(res->pte_base_phys + res->pte_idx * ENTRY_SIZE);
 	spin_unlock(ptl);
 
 	res->pte_val = pte_val(pte_entry);

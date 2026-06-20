@@ -1,10 +1,17 @@
 # pagewalker
 
-`pagewalker` is a Linux kernel module plus a user-space CLI that walk the x86-64
-page tables of any running process and show, step by step, how a virtual address
-is translated into a physical one. It exposes the raw paging structures
+`pagewalker` is a Linux kernel module plus a user-space CLI that walk the page
+tables of any running process and show, step by step, how a virtual address is
+translated into a physical one. It exposes the raw paging structures
 (PGD, P4D, PUD, PMD, PTE), decodes every entry, and verifies each step by reading
 the physical slot back inside the kernel.
+
+It builds from one source tree on **x86-64, arm64, and riscv64**: the walk and the
+report are architecture-neutral, and each hardware-defined detail (root register,
+entry-to-table extraction, paging-level detection, address representability, and
+the PTE flag decode) is isolated behind a small `#ifdef`/arch helper. The
+architecture is selected automatically by the kernel `CONFIG_*` / the compiler's
+`__x86_64__` / `__aarch64__` / `__riscv` macros.
 
 ## Components
 
@@ -18,17 +25,22 @@ the physical slot back inside the kernel.
 
 ## Features
 
-- **4- and 5-level paging** — detected at runtime via `pgtable_l5_enabled()`;
-  P4D is folded automatically on 4-level kernels.
+- **3-, 4- and 5-level paging** — detected at runtime per arch (x86 LA57, arm64
+  `pgtable_l4/l5_enabled()`, riscv Sv39/48/57); folded levels collapse
+  automatically. The address breakdown adapts to the level count and page size
+  reported by the kernel (so it is also correct for arm64 16K/64K granules).
+- **ISA root register** — Step 0 reports the architecture's root translation
+  register and what it points to: `CR3` (x86-64), `TTBR0_EL1` (arm64, the user
+  half; `TTBR1_EL1` covers the kernel half), or `satp` (riscv, with its `Sv`
+  MODE). The base value is `virt_to_phys(mm->pgd)` on every arch.
 - **Huge pages** — 2 MB (PMD leaf) and 1 GB (PUD leaf), including resident
   PROT_NONE / NUMA-balancing entries.
 - **Correct stop conditions** — swap / migration / non-present entries are
   reported as "not mapped" instead of being mistaken for a physical address.
-- **Address breakdown** — the virtual address is split into its fields (sign
-  Extension, the page-table indices, the page offset) and shown in hex and
-  binary, with the binary line aligned under the table's `BIN` row.
-- **Per-entry flag decode** — `P RW/RO U/S A D G PS NX` decoded per level (bit 7
-  is PS at PMD/PUD, PAT at PTE).
+- **Per-entry flag decode** — architecture-specific, because the PTE bit layouts
+  are disjoint (only the present/valid bit at bit 0 coincides): x86
+  `P RW/RO U/S A D PWT PCD G PS PAT NX`, arm64
+  `V RO/RW U/S AF nG SH Cont DBM PXN UXN AI=n BLK`, riscv `V R W X U G A D`.
 - **Kernel read-back verification** — for every level the module independently
   re-reads the entry straight from its physical slot (`*(base + idx*8)` via
   `phys_to_virt`) and the CLI confirms it matches the value obtained through the
@@ -59,6 +71,23 @@ make            # builds kernel/pagewalker.ko and user/pagewalkerctl
 make clean
 ```
 
+The module compiles for whatever architecture the running kernel is — no Makefile
+change needed. To cross-build for another arch, point the kernel `Makefile` at a
+matching prebuilt headers tree and override the toolchain:
+
+```bash
+# kernel module (against a prebuilt arm64 / riscv64 headers tree)
+make -C kernel ARCH=arm64   CROSS_COMPILE=aarch64-linux-gnu- KDIR=/path/to/arm64/headers
+make -C kernel ARCH=riscv   CROSS_COMPILE=riscv64-linux-gnu- KDIR=/path/to/riscv64/headers
+
+# user CLI
+make -C user CC=aarch64-linux-gnu-gcc
+make -C user CC=riscv64-linux-gnu-gcc
+
+# statically-linked self-test (loads the module + walks its own page; for QEMU)
+make -C user selftest
+```
+
 ## Usage
 
 Root is required to open the device and inspect other processes.
@@ -73,6 +102,11 @@ The address accepts an optional `0x` prefix and leading zeros
 (`0x000012ff50` is read as `0x12ff50`).
 
 ### Example
+
+This sample is from x86-64. On arm64 the report header reads `arm64`, Step 0
+shows `TTBR0_EL1`, and the flags use the arm64 token set; on riscv64 it reads
+`riscv64`, shows `satp` with its `Sv` MODE, the `V R W X U G A D` flags, and a
+3-row (Sv39) / 4-row (Sv48) / 5-row (Sv57) breakdown.
 
 ```text
 =========================================================
