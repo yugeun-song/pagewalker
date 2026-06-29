@@ -29,12 +29,15 @@
 #if defined(__x86_64__)
 # define PW_ARCH_NAME      "x86-64"
 # define PW_ROOT_REG_NAME  "CR3"
+# define PW_CONT_TERM      "contiguous"
 #elif defined(__aarch64__)
 # define PW_ARCH_NAME      "arm64"
 # define PW_ROOT_REG_NAME  "TTBR0_EL1"
+# define PW_CONT_TERM      "ARM64 contiguous (cont-PTE/cont-PMD)"
 #elif defined(__riscv) && (__riscv_xlen == 64)
 # define PW_ARCH_NAME      "riscv64"
 # define PW_ROOT_REG_NAME  "satp"
+# define PW_CONT_TERM      "RISC-V NAPOT"
 #else
 # error "pagewalker: unsupported architecture (need x86-64, arm64, or riscv64)"
 #endif
@@ -401,6 +404,32 @@ static int emit_row(char *buf, int off, const char *label, int labelw,
     return off;
 }
 
+/* Format a byte count as an exact binary-unit string (e.g. "2 MiB", "64 KiB"). */
+static void human_size(char *out, size_t cap, unsigned long long bytes)
+{
+    static const char *unit[] = { "B", "KiB", "MiB", "GiB", "TiB" };
+    unsigned long long v = bytes;
+    int u = 0;
+
+    while (u < 4 && v >= 1024 && (v % 1024) == 0) {
+        v /= 1024;
+        ++u;
+    }
+    snprintf(out, cap, "%llu %s", v, unit[u]);
+}
+
+/* Short name of the page-table level that held the final leaf entry. */
+static const char *leaf_level_name(unsigned int lvl)
+{
+    switch (lvl) {
+    case PW_LEAF_PTE: return "PTE";
+    case PW_LEAF_PMD: return "PMD";
+    case PW_LEAF_PUD: return "PUD";
+    case PW_LEAF_P4D: return "P4D";
+    default:          return "?";
+    }
+}
+
 /* Render the full walk report into `buf`; the definition lives below main(). */
 static int build_report(char *buf, const struct pagewalker_result *res, unsigned int pid);
 
@@ -517,6 +546,36 @@ static int build_report(char *buf, const struct pagewalker_result *res, unsigned
     int va_bits = (int)res->va_bits;
     char rdesc[256];
 
+    /*
+     * For a standard (non-contiguous) huge mapping, the translation stops at a
+     * higher level and the page offset spans that level's size, so show only
+     * the levels down to the leaf and widen the offset field to log2(page_size).
+     * Contiguous / NAPOT leaves keep the base-granule breakdown (their span is
+     * not a clean cut at a level boundary) and are called out in words instead.
+     */
+    int nshow = nlev;
+    int offbits = (int)res->page_shift;
+
+    if (res->is_valid && !res->is_contiguous &&
+        res->mapping_level != PW_LEAF_PTE && res->mapping_level != PW_LEAF_NONE) {
+        const char *target = leaf_level_name(res->mapping_level);
+        int li;
+
+        for (li = 0; li < nlev; ++li)
+            if (strcmp(levels[li].name, target) == 0)
+                break;
+        if (li < nlev) {
+            unsigned long long s = res->page_size;
+
+            nshow = li + 1;
+            offbits = 0;
+            while (s > 1) {
+                s >>= 1;
+                ++offbits;
+            }
+        }
+    }
+
     /* --- Report Header --- */
     offset += snprintf(buf + offset, BUFFER_SIZE - offset,
         "\n=========================================================\n");
@@ -549,7 +608,7 @@ static int build_report(char *buf, const struct pagewalker_result *res, unsigned
     fields[nf].nbits = 64 - va_bits;
     ++nf;
 
-    for (i = 0; i < nlev; ++i) {
+    for (i = 0; i < nshow; ++i) {
         int shift = res->page_shift + (nlev - 1 - i) * idx_bits;
         int nbits = (i == 0) ? (va_bits - shift_top) : idx_bits;
 
@@ -561,10 +620,10 @@ static int build_report(char *buf, const struct pagewalker_result *res, unsigned
         ++nf;
     }
 
-    snprintf(fields[nf].bits, sizeof(fields[nf].bits), "%d-%d", res->page_shift - 1, 0);
+    snprintf(fields[nf].bits, sizeof(fields[nf].bits), "%d-%d", offbits - 1, 0);
     fields[nf].name = "offset";
-    fields[nf].val = res->target_vaddr & ((1ULL << res->page_shift) - 1);
-    fields[nf].nbits = res->page_shift;
+    fields[nf].val = res->target_vaddr & ((1ULL << offbits) - 1);
+    fields[nf].nbits = offbits;
     ++nf;
 
     char hexs[9][16];
@@ -660,8 +719,8 @@ static int build_report(char *buf, const struct pagewalker_result *res, unsigned
     offset += snprintf(buf + offset, BUFFER_SIZE - offset,
         "  Description   : %s\n\n", rdesc);
 
-    /* Steps 1..N: one per walked level. */
-    for (i = 0; i < nlev; ++i) {
+    /* Steps 1..N: one per walked level (down to the leaf for a huge page). */
+    for (i = 0; i < nshow; ++i) {
         char step_name[64];
 
         snprintf(step_name, sizeof(step_name), "Step %d: %s (%s)",
@@ -677,8 +736,16 @@ static int build_report(char *buf, const struct pagewalker_result *res, unsigned
         "--------------------------------------------------------\n");
 
     if (res->is_valid) {
+        char szs[32];
+
+        human_size(szs, sizeof(szs), res->page_size);
         offset += snprintf(buf + offset, BUFFER_SIZE - offset,
             "[FINAL RESULT]\n");
+        offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+            "  Mapped Page    : %s  (leaf at %s%s%s)\n", szs,
+            leaf_level_name(res->mapping_level),
+            res->is_contiguous ? ", " : "",
+            res->is_contiguous ? PW_CONT_TERM : "");
         offset += snprintf(buf + offset, BUFFER_SIZE - offset,
             "  Page Base Phys : 0x%llx\n", res->page_base_phys);
         offset += snprintf(buf + offset, BUFFER_SIZE - offset,
@@ -714,6 +781,13 @@ static int build_report(char *buf, const struct pagewalker_result *res, unsigned
 #include <sys/reboot.h>
 #include <sys/syscall.h>
 
+#ifndef MAP_HUGETLB
+#define MAP_HUGETLB 0x40000
+#endif
+#ifndef MAP_HUGE_SHIFT
+#define MAP_HUGE_SHIFT 26
+#endif
+
 static int load_module(const char *path)
 {
     int fd = open(path, O_RDONLY);
@@ -726,16 +800,117 @@ static int load_module(const char *path)
     return (int)r;
 }
 
+/* One self-test case: map a region (optionally hugetlb), probe an offset. */
+struct pw_case {
+    const char *name;
+    size_t map_size;
+    int huge_shift;                 /* 0 = base page; else log2(huge size) */
+    size_t probe_off;               /* 8-aligned offset to write + walk */
+    unsigned long long exp_size;    /* expected page_size (0 = don't check) */
+    unsigned int exp_level;         /* expected mapping_level (0 = don't check) */
+    int exp_contig;                 /* expected is_contiguous (-1 = don't check) */
+};
+
+/* Best-effort hugetlb pool reservation; a size the arch can't back just fails. */
+static void reserve_pool(unsigned long kib, const char *count)
+{
+    char path[128];
+    int fd;
+
+    snprintf(path, sizeof(path),
+             "/sys/kernel/mm/hugepages/hugepages-%lukB/nr_hugepages", kib);
+    fd = open(path, O_WRONLY);
+    if (fd < 0)
+        return;
+    if (write(fd, count, strlen(count)) < 0)
+        ; /* ignore: the case mmap will SKIP if the pool stays empty */
+    close(fd);
+}
+
+/* Returns 0 = PASS, 1 = FAIL, 2 = SKIP. */
+static int run_case(const struct pw_case *c, unsigned long long sentinel)
+{
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    struct pagewalker_request req;
+    char buf[BUFFER_SIZE];
+    volatile unsigned long long *probe;
+    void *base;
+    int fd;
+    int bad = 0;
+
+    if (c->huge_shift)
+        flags |= MAP_HUGETLB | (c->huge_shift << MAP_HUGE_SHIFT);
+
+    base = mmap(NULL, c->map_size, PROT_READ | PROT_WRITE, flags, -1, 0);
+    if (base == MAP_FAILED) {
+        printf("CASE %-4s: SKIP  (mmap len=%zu huge_shift=%d errno=%d - pool unavailable)\n",
+               c->name, c->map_size, c->huge_shift, errno);
+        return 2;
+    }
+
+    probe = (volatile unsigned long long *)((char *)base + c->probe_off);
+    *probe = sentinel;   /* fault in + write the sentinel at the probed offset */
+
+    memset(&req, 0, sizeof(req));
+    req.pid = (unsigned int)getpid();
+    req.info.target_vaddr = (unsigned long long)(uintptr_t)probe;
+
+    fd = open(PAGEWALKER_PATH, O_RDWR);
+    if (fd < 0) {
+        printf("CASE %-4s: FAIL  (open %s errno=%d)\n", c->name, PAGEWALKER_PATH, errno);
+        munmap(base, c->map_size);
+        return 1;
+    }
+    if (ioctl(fd, PAGEWALKER_IOC_GET_INFO, &req) < 0) {
+        printf("CASE %-4s: FAIL  (ioctl errno=%d)\n", c->name, errno);
+        close(fd);
+        munmap(base, c->map_size);
+        return 1;
+    }
+    close(fd);
+
+    build_report(buf, &req.info, req.pid);
+    printf("%s", buf);
+
+    if (!req.info.is_valid)
+        bad = 1;
+    if (req.info.value_at_phys != sentinel)
+        bad = 1;        /* the probed offset's physical address must be correct */
+    if (c->exp_size && req.info.page_size != c->exp_size)
+        bad = 1;
+    if (c->exp_level && req.info.mapping_level != c->exp_level)
+        bad = 1;
+    if (c->exp_contig >= 0 && (int)req.info.is_contiguous != c->exp_contig)
+        bad = 1;
+
+    printf("CASE %-4s: %s  off=0x%zx size=%llu level=%u contig=%u valid=%d phys=%s"
+           "  (want size=%llu level=%u contig=%d)\n",
+           c->name, bad ? "FAIL" : "PASS", c->probe_off,
+           (unsigned long long)req.info.page_size, req.info.mapping_level,
+           req.info.is_contiguous, req.info.is_valid,
+           (req.info.value_at_phys == sentinel) ? "ok" : "MISMATCH",
+           c->exp_size, c->exp_level, c->exp_contig);
+
+    munmap(base, c->map_size);
+    return bad ? 1 : 0;
+}
+
 int main(void)
 {
     int is_init = (getpid() == 1);
-    const unsigned long long sentinel = 0xCAFEBABEDEADBEEFULL;
     size_t ps = (size_t)sysconf(_SC_PAGESIZE);
-    struct pagewalker_request req;
-    char buf[BUFFER_SIZE];
-    volatile unsigned long long *p;
-    int fd;
-    int ok = 0;
+    int passed = 0;
+    int failed = 0;
+    int skipped = 0;
+    size_t i;
+
+    const struct pw_case cases[] = {
+        /* name  map_size       huge  probe_off    exp_size    exp_level    contig */
+        { "4K",  ps,            0,    0,           (unsigned long long)ps, PW_LEAF_PTE, 0  },
+        { "64K", (size_t)1<<16, 16,   0x9000,      1ULL<<16,               PW_LEAF_PTE, 1  },
+        { "2M",  (size_t)1<<21, 21,   0x150000,    1ULL<<21,               PW_LEAF_PMD, 0  },
+        { "1G",  (size_t)1<<30, 30,   0x20000000,  1ULL<<30,               PW_LEAF_PUD, 0  },
+    };
 
     if (is_init) {
         mkdir("/proc", 0755);
@@ -744,53 +919,57 @@ int main(void)
         mount("proc", "/proc", "proc", 0, NULL);
         mount("sysfs", "/sys", "sysfs", 0, NULL);
         mount("devtmpfs", "/dev", "devtmpfs", 0, NULL);
+        /*
+         * Bind stdout/stderr to the serial console. An initramfs has no device
+         * nodes until devtmpfs is mounted (just above), so the kernel may have
+         * failed to open an initial console for PID 1; without this the report
+         * would never reach the QEMU serial log.
+         */
+        {
+            int cfd = open("/dev/console", O_WRONLY);
+
+            if (cfd >= 0) {
+                dup2(cfd, 1);
+                dup2(cfd, 2);
+                if (cfd > 2)
+                    close(cfd);
+            }
+        }
         if (load_module("/pagewalker.ko") != 0)
             printf("SELFTEST: finit_module(/pagewalker.ko) failed errno=%d\n", errno);
         else
             printf("SELFTEST: module loaded\n");
     }
 
-    p = mmap(NULL, ps, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) {
-        printf("SELFTEST: mmap failed errno=%d\n", errno);
-        goto done;
+    /* 64K = arm64 cont-PTE / riscv NAPOT; 2M = PMD; 1G = PUD (boot-reserved). */
+    reserve_pool(64, "16");
+    reserve_pool(2048, "16");
+    reserve_pool(1048576, "1");
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        int r = run_case(&cases[i], 0xCAFEBABEDEADBEEFULL + i);
+
+        if (r == 0)
+            ++passed;
+        else if (r == 1)
+            ++failed;
+        else
+            ++skipped;
     }
-    *p = sentinel;   /* fault the page in and write the sentinel at offset 0 */
 
-    memset(&req, 0, sizeof(req));
-    req.pid = (unsigned int)getpid();
-    req.info.target_vaddr = (unsigned long long)(uintptr_t)p;
-
-    fd = open(PAGEWALKER_PATH, O_RDWR);
-    if (fd < 0) {
-        printf("SELFTEST: open %s failed errno=%d\n", PAGEWALKER_PATH, errno);
-        goto done;
-    }
-    if (ioctl(fd, PAGEWALKER_IOC_GET_INFO, &req) < 0) {
-        printf("SELFTEST: ioctl failed errno=%d\n", errno);
-        close(fd);
-        goto done;
-    }
-    close(fd);
-
-    build_report(buf, &req.info, req.pid);
-    printf("%s", buf);
-
-    ok = req.info.is_valid && req.info.value_at_phys == sentinel;
-    if (ok)
-        printf("\nSELFTEST: PASS (%s: value_at_phys == sentinel 0x%llx)\n",
-               PW_ARCH_NAME, sentinel);
+    printf("\nSELFTEST SUMMARY (%s): passed=%d failed=%d skipped=%d\n",
+           PW_ARCH_NAME, passed, failed, skipped);
+    /* Require the always-available cases (4K + 2M) and zero failures. */
+    if (failed == 0 && passed >= 2)
+        printf("SELFTEST: ALL PASS (%s)\n", PW_ARCH_NAME);
     else
-        printf("\nSELFTEST: FAIL (%s: is_valid=%d value_at_phys=0x%llx want 0x%llx)\n",
-               PW_ARCH_NAME, req.info.is_valid,
-               (unsigned long long)req.info.value_at_phys, sentinel);
+        printf("SELFTEST: FAIL (%s)\n", PW_ARCH_NAME);
 
-done:
     fflush(stdout);
     if (is_init) {
         sync();
         reboot(RB_POWER_OFF);
     }
-    return ok ? 0 : 1;
+    return (failed == 0 && passed >= 2) ? 0 : 1;
 }
 #endif /* PW_SELFTEST */
