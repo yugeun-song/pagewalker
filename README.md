@@ -33,8 +33,19 @@ architecture is selected automatically by the kernel `CONFIG_*` / the compiler's
   register and what it points to: `CR3` (x86-64), `TTBR0_EL1` (arm64, the user
   half; `TTBR1_EL1` covers the kernel half), or `satp` (riscv, with its `Sv`
   MODE). The base value is `virt_to_phys(mm->pgd)` on every arch.
-- **Huge pages** — 2 MB (PMD leaf) and 1 GB (PUD leaf), including resident
-  PROT_NONE / NUMA-balancing entries.
+- **Huge pages, every size, every arch** — the leaf can sit at any level and the
+  module reports the *true* mapped span: 4 KiB (PTE), 2 MiB (PMD), 1 GiB (PUD),
+  the 512 GiB P4D terapage, **and the architecture's contiguous encodings** —
+  arm64 cont-PTE (64 KiB) / cont-PMD (32 MiB) and riscv NAPOT (64 KiB). The size
+  comes from the arch's own `*_leaf_size()` accessors, so the reported physical
+  base and offset stay correct even for a contiguous / NAPOT page whose span
+  exceeds the base granule (a plain `~PAGE_MASK` would drop the high offset bits,
+  e.g. `va[15:12]` of a riscv 64 KiB NAPOT page). Resident PROT_NONE /
+  NUMA-balancing huge entries stay valid; swap / migration huge entries are
+  rejected. The result carries `page_size`, `mapping_level` (PTE/PMD/PUD/P4D) and
+  `is_contiguous`; the report prints a `Mapped Page: <size> (leaf at <level>
+  [, contiguous])` line and trims the address breakdown to the leaf with a
+  widened page offset.
 - **Correct stop conditions** — swap / migration / non-present entries are
   reported as "not mapped" instead of being mistaken for a physical address.
 - **Per-entry flag decode** — architecture-specific, because the PTE bit layouts
@@ -50,6 +61,28 @@ architecture is selected automatically by the kernel `CONFIG_*` / the compiler's
   rate-limited, so the module stays safe under very high-frequency use.
 - **Robust input handling** — PID-range and canonical-address checks; POSIX errno
   (`ESRCH`, `EINVAL`, `EADDRNOTAVAIL`) mapped to clear CLI messages.
+
+## Verified under QEMU
+
+The self-test (`make -C user selftest`) boots as PID 1 init in QEMU against the
+prebuilt 6.12 research kernels and walks a known 4K / 64K / 2M / 1G mapping on
+each arch. For every case it checks the reported `page_size`, `mapping_level`,
+`is_contiguous`, and that the physical content read back equals the sentinel it
+wrote — at an offset *above* the base granule, so a contiguous / NAPOT page
+genuinely exercises the wide offset:
+
+```
+ case   x86-64        arm64                 riscv64
+ ----   -----------   -------------------   -----------------
+ 4K     PTE           PTE                   PTE
+ 64K    n/a           PTE (cont-PTE)        PTE (NAPOT)
+ 2M     PMD           PMD                   PMD
+ 1G     PUD           PUD                   PUD
+```
+
+All applicable cases pass on all three arches (64 KiB has no x86-64 hugetlb
+size, so it is reported as skipped there). riscv64 is run with QEMU
+`-cpu rv64,svnapot=true` so the 64 KiB case maps through a NAPOT PTE.
 
 ## Project Structure
 
@@ -84,7 +117,9 @@ make -C kernel ARCH=riscv   CROSS_COMPILE=riscv64-linux-gnu- KDIR=/path/to/riscv
 make -C user CC=aarch64-linux-gnu-gcc
 make -C user CC=riscv64-linux-gnu-gcc
 
-# statically-linked self-test (loads the module + walks its own page; for QEMU)
+# statically-linked self-test: as PID 1 it loads the module and walks its own
+# 4K / 64K / 2M / 1G mappings, asserting page_size, mapping_level, is_contiguous
+# and the physical content for each (drives the QEMU multi-arch tests above)
 make -C user selftest
 ```
 
@@ -114,7 +149,7 @@ shows `TTBR0_EL1`, and the flags use the arm64 token set; on riscv64 it reads
 =========================================================
  Target PID   : 1234
  Target VAddr : 0x00007ffeeec18460
- Paging Mode  : 4-Level Paging
+ Paging Mode  : 4-Level Paging (VA 48-bit, page 4 KiB)
 +------+------------------+-----------+-----------+-----------+-----------+--------------+
 | Bits |      63-48       |   47-39   |   38-30   |   29-21   |   20-12   |     11-0     |
 +------+------------------+-----------+-----------+-----------+-----------+--------------+
@@ -138,11 +173,21 @@ shows `TTBR0_EL1`, and the flags use the arm64 token set; on riscv64 it reads
   Status      : Valid (Present)
 --------------------------------------------------------
 [FINAL RESULT]
+  Mapped Page    : 4 KiB  (leaf at PTE)
   Page Base Phys : 0x1f6989000
   Offset         : 0x460
   Final Phys Addr: 0x1f6989460
+
+[VERIFICATION]
+  Content at Phys: 0x...
 --------------------------------------------------------
 ```
+
+For a huge mapping the breakdown stops at the leaf and the offset widens to the
+page size — e.g. a 1 GiB page shows `... | PGD | PUD | offset[29-0]`, the steps
+end at the PUD leaf, and the final block reads
+`Mapped Page : 1 GiB  (leaf at PUD)`; arm64 / riscv 64 KiB pages read
+`64 KiB  (leaf at PTE, ARM64 contiguous ...)` / `(leaf at PTE, RISC-V NAPOT)`.
 
 ### Errors
 
@@ -159,7 +204,8 @@ Every operation is logged to `dmesg` (watch live with `sudo dmesg -w`):
 
 ```text
 pagewalker: loaded: /dev/pagewalker ready (minor 123)
-pagewalker: pid 1234 vaddr 0x7ffeeec18460 -> phys 0x1f6989460 [mapped via 4K page]
+pagewalker: pid 1234 vaddr 0x7ffeeec18460 -> phys 0x1f6989460 [mapped via PTE 4K page]
+pagewalker: pid 1234 vaddr 0x7faa60000000 -> phys 0x60000000 [mapped via PUD-level huge page]
 pagewalker: pid 1234 vaddr 0x7f1200000000 : walk stopped [PTE not present (swapped out or unmapped)]
 pagewalker: pid 99999999 : rejected (no such process)
 pagewalker: unloaded
