@@ -59,6 +59,10 @@ static u64 arch_entry_to_table_phys(u64 entry_val)
 	return entry_val & PHYSICAL_PAGE_MASK;
 }
 
+/* x86 folds the upper levels inline, so the generic accessors are module-safe. */
+#define pw_p4d_offset p4d_offset
+#define pw_pud_offset pud_offset
+
 #elif defined(CONFIG_ARM64)
 
 static int arch_paging_level(void)
@@ -87,6 +91,10 @@ static u64 arch_entry_to_table_phys(u64 entry_val)
 	return __pte_to_phys(__pte(entry_val));
 }
 
+/* arm64 folds the upper levels inline, so the generic accessors are module-safe. */
+#define pw_p4d_offset p4d_offset
+#define pw_pud_offset pud_offset
+
 #elif defined(CONFIG_RISCV) && defined(CONFIG_64BIT)
 
 /* RV64 stores a 44-bit PPN in PTE bits [53:10]; the flags live in bits [9:0]. */
@@ -110,6 +118,26 @@ static unsigned int arch_va_bits(void)
 static u64 arch_entry_to_table_phys(u64 entry_val)
 {
 	return ((entry_val & PW_RISCV_PFN_MASK) >> _PAGE_PFN_SHIFT) << PAGE_SHIFT;
+}
+
+/*
+ * riscv defines pud_offset()/p4d_offset() out-of-line in arch/riscv/mm and does
+ * NOT export them, so a module cannot link against them (x86/arm64 fold these
+ * inline). Replicate the kernel's exact runtime level-folding here using only
+ * inline helpers and the exported pgtable_l4_enabled / pgtable_l5_enabled flags.
+ */
+static inline p4d_t *pw_p4d_offset(pgd_t *pgd, unsigned long addr)
+{
+	if (pgtable_l5_enabled)
+		return pgd_pgtable(pgdp_get(pgd)) + p4d_index(addr);
+	return (p4d_t *)pgd;
+}
+
+static inline pud_t *pw_pud_offset(p4d_t *p4d, unsigned long addr)
+{
+	if (pgtable_l4_enabled)
+		return p4d_pgtable(p4dp_get(p4d)) + pud_index(addr);
+	return (pud_t *)p4d;
 }
 
 #else
@@ -148,6 +176,30 @@ static bool arch_addr_representable(unsigned long vaddr, unsigned int va_bits)
 static bool entry_present(u64 entry_val)
 {
 	return pte_present(__pte(entry_val));
+}
+
+/*
+ * Record a resolved leaf uniformly for every level. size is the TRUE mapped
+ * span from the arch's *_leaf_size() accessor, so it already folds in arm64
+ * contiguous (cont-PTE/cont-PMD) and riscv NAPOT runs. We round the raw leaf
+ * base down to that span and take the offset modulo it: this both reports the
+ * huge page's real base and fixes the offset for contiguous/NAPOT leaves whose
+ * span exceeds the base granule (a plain ~PAGE_MASK would drop the high offset
+ * bits, e.g. va[15:12] of a riscv 64K NAPOT page). base_phys_raw is the leaf
+ * entry's frame base (PFN_PHYS(*_pfn) or the arch table-phys extractor).
+ */
+static void set_leaf(struct pagewalker_result *res, unsigned long vaddr,
+		     u64 base_phys_raw, u64 size, u32 level, bool contiguous)
+{
+	u64 mask = size - 1;
+
+	res->page_size = size;
+	res->mapping_level = level;
+	res->is_contiguous = contiguous ? 1 : 0;
+	res->page_base_phys = base_phys_raw & ~mask;
+	res->page_offset = vaddr & mask;
+	res->final_phys_addr = res->page_base_phys + res->page_offset;
+	res->is_valid = BIT_IS_SET;
 }
 
 static long pagewalker_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
@@ -292,7 +344,7 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	}
 
 	res->p4d_idx = p4d_index(vaddr);
-	p4d = p4d_offset(pgd, vaddr);
+	p4d = pw_p4d_offset(pgd, vaddr);
 	p4de = p4dp_get(p4d);
 	/*
 	 * For a hardware-present level the next table base comes from the entry;
@@ -306,13 +358,31 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	res->p4d_val = p4d_val(p4de);
 	res->p4d_readback = read_entry_phys(res->p4d_base_phys + res->p4d_idx * ENTRY_SIZE);
 
-	if (p4d_none(p4de) || p4d_bad(p4de)) {
-		reason = "P4D entry empty or bad";
+	if (p4d_none(p4de)) {
+		reason = "P4D entry empty";
+		goto out_unlock;
+	}
+
+	if (p4d_leaf(p4de)) {
+		/* See the pud_leaf() note: gate residency via pte_present() mirror. */
+		if (!entry_present(p4d_val(p4de))) {
+			reason = "P4D huge entry not present (swap/migration)";
+			goto out_unlock;
+		}
+		reason = "mapped via P4D-level huge page";
+		set_leaf(res, vaddr, arch_entry_to_table_phys(p4d_val(p4de)),
+			 p4d_leaf_size(p4de), PW_LEAF_P4D, false);
+		read_physical_content(res);
+		goto out_unlock;
+	}
+
+	if (p4d_bad(p4de)) {
+		reason = "P4D entry bad";
 		goto out_unlock;
 	}
 
 	res->pud_idx = pud_index(vaddr);
-	pud = pud_offset(p4d, vaddr);
+	pud = pw_pud_offset(p4d, vaddr);
 	pude = pudp_get(pud);
 	res->pud_base_phys = arch_entry_to_table_phys(p4d_val(p4de));
 	res->pud_val = pud_val(pude);
@@ -331,14 +401,13 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 		 * balancing huge page stays valid.
 		 */
 		if (!entry_present(pud_val(pude))) {
-			reason = "1G huge entry not present (swap/migration)";
+			reason = "PUD huge entry not present (swap/migration)";
 			goto out_unlock;
 		}
-		reason = "mapped via 1G huge page";
-		res->page_offset = vaddr & ~PUD_MASK;
-		res->page_base_phys = PFN_PHYS(pud_pfn(pude));
-		res->final_phys_addr = res->page_base_phys + res->page_offset;
-		res->is_valid = BIT_IS_SET;
+		reason = "mapped via PUD-level huge page";
+		set_leaf(res, vaddr, PFN_PHYS(pud_pfn(pude)),
+			 pud_leaf_size(pude), PW_LEAF_PUD,
+			 pud_leaf_size(pude) != PUD_SIZE);
 		read_physical_content(res);
 		goto out_unlock;
 	}
@@ -363,14 +432,13 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	if (pmd_leaf(pmde)) {
 		/* See the pud_leaf() note: present|protnone, mirroring pte_present(). */
 		if (!entry_present(pmd_val(pmde))) {
-			reason = "2M huge entry not present (swap/migration)";
+			reason = "PMD huge entry not present (swap/migration)";
 			goto out_unlock;
 		}
-		reason = "mapped via 2M huge page";
-		res->page_offset = vaddr & ~PMD_MASK;
-		res->page_base_phys = PFN_PHYS(pmd_pfn(pmde));
-		res->final_phys_addr = res->page_base_phys + res->page_offset;
-		res->is_valid = BIT_IS_SET;
+		reason = "mapped via PMD-level huge page";
+		set_leaf(res, vaddr, PFN_PHYS(pmd_pfn(pmde)),
+			 pmd_leaf_size(pmde), PW_LEAF_PMD,
+			 pmd_leaf_size(pmde) != PMD_SIZE);
 		read_physical_content(res);
 		goto out_unlock;
 	}
@@ -419,11 +487,21 @@ static int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 		goto out_unlock;
 	}
 
-	reason = "mapped via 4K page";
-	res->page_offset = vaddr & ~PAGE_MASK;
-	res->page_base_phys = PFN_PHYS(pte_pfn(pte_entry));
-	res->final_phys_addr = res->page_base_phys | res->page_offset;
-	res->is_valid = BIT_IS_SET;
+	/*
+	 * pte_leaf_size() returns the base granule for an ordinary 4K PTE, but the
+	 * full contiguous span for an arm64 cont-PTE (64K) or a riscv NAPOT leaf
+	 * (64K). set_leaf() then rounds the base and widens the offset accordingly,
+	 * so a contiguous mapping resolves the correct physical address even when
+	 * the target offset lies above the base granule.
+	 */
+	{
+		u64 sz = pte_leaf_size(pte_entry);
+
+		reason = (sz != PAGE_SIZE) ? "mapped via PTE contiguous page"
+					   : "mapped via PTE 4K page";
+		set_leaf(res, vaddr, PFN_PHYS(pte_pfn(pte_entry)), sz,
+			 PW_LEAF_PTE, sz != PAGE_SIZE);
+	}
 
 	read_physical_content(res);
 

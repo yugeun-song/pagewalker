@@ -12,6 +12,17 @@
 #define PAGING_LEVEL_4       4
 #define PAGING_LEVEL_5       5
 
+/*
+ * Which page-table level held the final leaf entry (result.mapping_level).
+ * A leaf above PTE is a huge mapping; PW_LEAF_NONE means the walk did not
+ * reach a present leaf.
+ */
+#define PW_LEAF_NONE         0
+#define PW_LEAF_PTE          1
+#define PW_LEAF_PMD          2
+#define PW_LEAF_PUD          3
+#define PW_LEAF_P4D          4
+
 struct pagewalker_result {
 	__u64 target_vaddr;
 
@@ -66,6 +77,19 @@ struct pagewalker_result {
 	__u64 pte_base_phys;
 	__u64 page_base_phys;
 	__u64 final_phys_addr;
+
+	/*
+	 * Effective mapping geometry, filled when is_valid. page_size is the true
+	 * size in bytes of the page backing target_vaddr - the actual leaf span,
+	 * including arm64 contiguous (cont-PTE 64K / cont-PMD 32M) and riscv NAPOT
+	 * runs, not just the base granule. mapping_level says which level held the
+	 * leaf (PW_LEAF_PTE/PMD/PUD/P4D); is_contiguous is 1 for an arm64
+	 * contiguous or riscv NAPOT leaf (page_size then exceeds the level's base
+	 * size). page_base_phys/page_offset are relative to page_size.
+	 */
+	__u64 page_size;
+	__u32 mapping_level;
+	__u32 is_contiguous;
 
 	/* Verification - Actual 8 bytes read from the physical address */
 	__u64 value_at_phys;
