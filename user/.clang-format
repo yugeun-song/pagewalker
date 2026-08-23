@@ -1,0 +1,23 @@
+# User-side code: a custom readable style.
+# InsertBraces makes braces mandatory on EVERY control/loop body, even a single
+# statement. ColumnLimit is 0 so clang-format does not re-wrap hand-formatted
+# lines; it enforces braces, brace placement, and kernel-style case alignment.
+BasedOnStyle: LLVM
+SortIncludes: false
+IndentWidth: 4
+UseTab: Never
+TabWidth: 4
+ColumnLimit: 0
+ContinuationIndentWidth: 4
+BreakBeforeBraces: Linux
+InsertBraces: true
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: true
+IndentCaseLabels: false
+AlignConsecutiveShortCaseStatements:
+  Enabled: true
+  AcrossComments: false
+PointerAlignment: Right
+SpaceAfterCStyleCast: false

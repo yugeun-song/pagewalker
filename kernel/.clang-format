@@ -1,0 +1,22 @@
+# Kernel-side code: strict Linux kernel style.
+# Braces are NOT inserted for single-statement bodies (kernel omits them).
+# ColumnLimit is 0 so clang-format enforces indentation, brace placement and
+# case alignment without re-wrapping the hand-written lines.
+BasedOnStyle: LLVM
+SortIncludes: false
+IndentWidth: 8
+UseTab: Always
+TabWidth: 8
+ColumnLimit: 0
+ContinuationIndentWidth: 8
+BreakBeforeBraces: Linux
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+IndentCaseLabels: false
+AlignConsecutiveShortCaseStatements:
+  Enabled: true
+  AcrossComments: false
+PointerAlignment: Right
+SpaceAfterCStyleCast: false
