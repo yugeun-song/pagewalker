@@ -8,6 +8,7 @@
 #define PAGEWALKER_PATH        "/dev/pagewalker"
 #define PAGEWALKER_IOC_MAGIC   'k'
 #define PAGEWALKER_CMD_ID      1
+#define PAGEWALKER_CMD_READ    2
 #define PAGING_LEVEL_3       3
 #define PAGING_LEVEL_4       4
 #define PAGING_LEVEL_5       5
@@ -105,5 +106,49 @@ struct pagewalker_request {
 };
 
 #define PAGEWALKER_IOC_GET_INFO _IOWR(PAGEWALKER_IOC_MAGIC, PAGEWALKER_CMD_ID, struct pagewalker_request)
+
+/* ------------------------------------------------------------------------- *
+ * Bulk read (command 2)
+ *
+ * Command 1 above resolves ONE address and reports a single u64 at it. Command
+ * 2 copies an arbitrary run of bytes out of a target address space into a
+ * user-supplied buffer, and also returns the full walk of the START address so
+ * the CLI can still print the translation. The walk is repeated per page inside
+ * the run (physical frames are contiguous only to the end of a leaf), and every
+ * copy is fault-tolerant, so a hole or an unmapped page truncates the result
+ * instead of faulting. The request rides a distinct ioctl number so command 1's
+ * ABI (its _IOWR size, hence its number) stays frozen.
+ * ------------------------------------------------------------------------- */
+
+/* flags */
+#define PW_READ_F_KERNEL     (1u << 0)  /* vaddr is a kernel-space address; pid ignored */
+#define PW_READ_F_ALLOW_MMIO (1u << 1)  /* permit reads of non-System-RAM (MMIO / reserved) */
+
+/* stopped reason (out) */
+#define PW_STOP_OK           0  /* the whole run was copied */
+#define PW_STOP_UNMAPPED     1  /* a page in the run is not mapped / not present */
+#define PW_STOP_FAULT        2  /* a physical/kernel read faulted (hole, bad frame) */
+#define PW_STOP_NONCANON     3  /* the start address is not representable on this arch */
+#define PW_STOP_TOOBIG       4  /* size exceeded the per-call maximum (clamped) */
+#define PW_STOP_MMIO         5  /* a page is not System RAM; refused (pass allow-mmio) */
+
+/* Upper bound on one call's size; the CLI loops for larger dumps. */
+#define PW_READ_MAX          (16u << 20)  /* 16 MiB */
+
+struct pagewalker_read_request {
+	__u32 pid;              /* target pid (ignored when PW_READ_F_KERNEL) */
+	__u32 flags;            /* PW_READ_F_* */
+	__u64 vaddr;            /* first virtual address to read */
+	__u64 size;             /* bytes requested */
+	__u64 ubuf;             /* userspace destination buffer (pointer as integer) */
+
+	__u64 bytes_read;       /* out: bytes actually copied into ubuf */
+	__u32 stopped;          /* out: PW_STOP_* (0 = full run copied) */
+	__u32 pad;
+
+	struct pagewalker_result info;  /* out: full walk of the START vaddr */
+};
+
+#define PAGEWALKER_IOC_READ _IOWR(PAGEWALKER_IOC_MAGIC, PAGEWALKER_CMD_READ, struct pagewalker_read_request)
 
 #endif
