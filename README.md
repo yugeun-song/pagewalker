@@ -1,6 +1,6 @@
 # pagewalker
 
-`pagewalker` is a Linux kernel module plus a user-space CLI that walk the page
+`pagewalker` is a Linux kernel module and a user-space CLI that walk the page
 tables of any running process and show, step by step, how a virtual address is
 translated into a physical one. It exposes the raw paging structures
 (PGD, P4D, PUD, PMD, PTE), decodes every entry, and verifies each step by reading
@@ -22,7 +22,10 @@ architecture is selected automatically by the kernel `CONFIG_*` / the compiler's
 
 ## Components
 
-- **Kernel module** — `kernel/pagewalker.c` builds `pagewalker.ko`. It walks the
+- **Kernel module** — `kernel/` builds `pagewalker.ko` from `main.c` (character
+  device + `ioctl` dispatch), `walk.c` (the architecture-neutral page-table
+  walk), and `read.c` (bulk read), with the per-arch specifics isolated in
+  `arch.h`. It walks the
   target PID's page tables under `mmap_read_lock`, snapshots each level with the
   modern typed accessors (`pgdp_get`, `pmdp_get_lockless`, `ptep_get`), and
   serialises the PTE step with `pmd_lock` against khugepaged / `MADV_COLLAPSE`.
@@ -32,7 +35,10 @@ architecture is selected automatically by the kernel `CONFIG_*` / the compiler's
   contiguous only within a leaf) and checking every frame is System RAM. A
   kernel walk is rooted at the arch kernel table read straight from the hardware
   root register (`CR3` / `TTBR1_EL1` / `satp`), since `init_mm` is not exported.
-- **User CLI** — `user/main.c` builds `pagewalkerctl`, which drives the ioctls,
+- **User CLI** — `user/` builds `pagewalkerctl` from `main.c` (argument handling
+  and dispatch), `report.c` (the walk report and per-arch flag decode), `dump.c`
+  (hexdump / CJK gutter), `symbols.c` (kernel `/proc/kallsyms` and userspace ELF
+  symbol resolution), and `read.c` (the command-2 driver). It drives the ioctls,
   resolves kernel symbols via `/proc/kallsyms`, and renders the walk report plus
   the hexdump / CJK / raw byte output.
 
@@ -119,13 +125,26 @@ size, so it is reported as skipped there). riscv64 is run with QEMU
 ```
 pagewalker/
 ├── include/pagewalker_common.h   # shared ioctl ABI (request / result, macros)
-├── kernel/pagewalker.c           # kernel module -> pagewalker.ko
-├── user/main.c                   # user CLI       -> pagewalkerctl
+├── kernel/                       # module -> pagewalker.ko
+│   ├── main.c                    #   character device + ioctl dispatch
+│   ├── walk.c                    #   architecture-neutral page-table walk
+│   ├── read.c                    #   bulk read (command 2) + System-RAM gate
+│   ├── arch.h                    #   per-arch layer (root register, level fold)
+│   └── pagewalker.h              #   internal cross-file interface
+├── user/                         # CLI -> pagewalkerctl
+│   ├── main.c                    #   argument handling + dispatch
+│   ├── report.c                  #   walk report + per-arch flag decode
+│   ├── dump.c                    #   hexdump / CJK-aware gutter
+│   ├── symbols.c                 #   /proc/kallsyms + userspace ELF resolution
+│   ├── read.c                    #   command-2 driver + size / address parsing
+│   └── selftest.c                #   static QEMU self-test (make selftest)
 └── Makefile                      # builds both (kernel Kbuild + gcc)
 ```
 
 Build artifacts are produced next to their source (kernel Kbuild convention);
-there is no separate output directory.
+there is no separate output directory. Each tree carries its own `.clang-format`:
+`kernel/` follows strict Linux kernel style, while `user/` uses a readable variant
+that keeps braces on every control statement.
 
 ## Build
 
@@ -173,11 +192,55 @@ optional `K`/`M`/`G` suffix (`256`, `0x40`, `2K`).
 
 For a process the target may instead be the **name of a global/static symbol**
 in that process: the CLI reads `/proc/<pid>/maps` and the object's ELF symbol
-table and computes the runtime address itself (so it works under PIE / ASLR). A
-local, stack or heap variable has no symbol and cannot be resolved — the tool
-says so and asks for the runtime address (e.g. one printed with `%p`). Kernel
-symbol names differ per arch: the top-level table is `init_top_pgt` on x86-64
-and `swapper_pg_dir` on arm64.
+table and computes the runtime address itself (so it works under PIE / ASLR).
+
+Resolution reads `.symtab` first, then `.dynsym`. So to reference a variable by
+name, build the program so the variable has an ELF symbol:
+
+- Declare it at **file scope** — a global, or a file-scope `static` — not as a
+  local. A stack/heap variable has no static address and no symbol, so it can
+  only ever be reached by its runtime address (print it with `%p` and pass that
+  hex value instead of a name).
+- **Keep the symbol table** — do not `strip` the binary. A file-scope `static`
+  lives only in `.symtab`, which `strip` removes; an exported global also appears
+  in `.dynsym` and so survives stripping. A default `gcc`/`cc` build keeps
+  `.symtab`, so no special flag is needed; just avoid `strip` / `-s`. Debug info
+  (`-g`) is not required — the CLI reads the ELF symbol table, not DWARF.
+
+For example, build this program with `cc -O2 -o demo demo.c` (unstripped):
+
+```c
+#include <stdio.h>
+#include <unistd.h>
+
+/* file scope: the compiler emits a symbol, so it is reachable by name */
+char greeting[] = "hello, page tables";
+
+int main(void)
+{
+    /* a local lives on the stack: no symbol, only a runtime address */
+    char local[] = "i live on the stack";
+
+    printf("pid=%d  &local=%p\n", getpid(), (void *)local);
+
+    /* stay alive so another terminal can inspect us */
+    while (1) {
+        sleep(60);
+    }
+    return 0;
+}
+```
+
+It prints, say, `pid=4242  &local=0x7ffe1c0a8b30`. Read the global by **name**
+and the local by the **address** it printed:
+
+```bash
+sudo ./user/pagewalkerctl 4242 greeting 32 -c        # global, resolved by symbol
+sudo ./user/pagewalkerctl 4242 0x7ffe1c0a8b30 24 -c  # local, by its %p address
+```
+
+Kernel symbol names differ per arch: the top-level table is `init_top_pgt` on
+x86-64 and `swapper_pg_dir` on arm64.
 
 ### Options
 
@@ -196,13 +259,18 @@ and `swapper_pg_dir` on arm64.
 ### Reading memory
 
 ```bash
-# 256 bytes of a process mapping, as a CJK-aware hexdump
-sudo ./user/pagewalkerctl 1234 0x7ffeeec18000 256 -c
+# 64 bytes of the running kernel's text, as a hexdump
+sudo ./user/pagewalkerctl -k _text 64
 
-# a global variable by name in that process (resolved via its ELF, PIE-safe)
-sudo ./user/pagewalkerctl 1234 g_config 64
+# a global symbol by name in a running process, resolved via its ELF (PIE-safe);
+# environ is a libc global present in every process
+sudo ./user/pagewalkerctl "$(pgrep -n bash)" environ 32 -c
 
-# the first 64 bytes of the running kernel's text, then disassemble them
+# a process mapping by address; take a real range from /proc/<pid>/maps first, e.g.
+#   awk 'NR==1{print $1}' /proc/1234/maps   ->  562300abc000-562300ace000
+sudo ./user/pagewalkerctl 1234 0x562300abc000 256 -c
+
+# the first 64 bytes of kernel text, then disassemble them
 sudo ./user/pagewalkerctl -k _text 64 --raw | objdump -D -b binary -m i386:x86-64 -
 
 # the live memblock allocator state (present on arches that keep it post-boot)
