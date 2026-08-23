@@ -5,17 +5,20 @@ CC ?= gcc
 CFLAGS = -Wall -O2
 TARGET = pagewalkerctl
 SELFTEST = selftest
-SRC = main.c
+
+# The CLI links every unit; the self-test needs only the report renderer.
+CLI_SRC = main.c report.c dump.c symbols.c read.c
+SELFTEST_SRC = selftest.c report.c
 
 .PHONY: all selftest clean
 
 all:
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRC)
+	$(CC) $(CFLAGS) -o $(TARGET) $(CLI_SRC)
 
-# Self-contained, statically linked verifier (built with -DPW_SELFTEST). Run as
-# PID 1 it loads the module and walks its own mapping; used for QEMU testing.
+# Self-contained, statically linked verifier. Run as PID 1 it loads the module
+# and walks its own mapping; used for QEMU testing.
 selftest:
-	$(CC) $(CFLAGS) -DPW_SELFTEST -static -o $(SELFTEST) $(SRC)
+	$(CC) $(CFLAGS) -static -o $(SELFTEST) $(SELFTEST_SRC)
 
 clean:
 	rm -f $(TARGET) $(SELFTEST)
