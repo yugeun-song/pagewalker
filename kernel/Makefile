@@ -1,4 +1,5 @@
 obj-m += pagewalker.o
+pagewalker-objs := main.o walk.o read.o
 
 # Detect kernel build path. Override KDIR (and ARCH / CROSS_COMPILE) to build
 # the module for arm64 or riscv64 against a prebuilt headers tree, e.g.:
