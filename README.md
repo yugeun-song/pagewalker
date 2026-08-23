@@ -6,6 +6,13 @@ translated into a physical one. It exposes the raw paging structures
 (PGD, P4D, PUD, PMD, PTE), decodes every entry, and verifies each step by reading
 the physical slot back inside the kernel.
 
+Given a size it also dumps that many bytes of the mapped memory as a hexdump
+(with an optional CJK/UTF-8 text gutter) or as a raw stream for piping. With
+`-k` it walks and reads the **kernel's own** address space too — `_text`,
+`memblock`, `swapper_pg_dir`, and any symbol from `/proc/kallsyms`. Every read
+is fault-tolerant and, by default, refuses non-RAM (MMIO / reserved) frames, so
+a read attempt never panics the machine or pokes a device register.
+
 It builds from one source tree on **x86-64, arm64, and riscv64**: the walk and the
 report are architecture-neutral, and each hardware-defined detail (root register,
 entry-to-table extraction, paging-level detection, address representability, and
@@ -19,9 +26,15 @@ architecture is selected automatically by the kernel `CONFIG_*` / the compiler's
   target PID's page tables under `mmap_read_lock`, snapshots each level with the
   modern typed accessors (`pgdp_get`, `pmdp_get_lockless`, `ptep_get`), and
   serialises the PTE step with `pmd_lock` against khugepaged / `MADV_COLLAPSE`.
-  It exposes `/dev/pagewalker` through `ioctl`.
-- **User CLI** — `user/main.c` builds `pagewalkerctl`, which drives the ioctl and
-  renders a detailed, column-aligned report.
+  It exposes `/dev/pagewalker` (root-only) through two `ioctl` commands:
+  command 1 resolves one address and reports the single `u64` at it; command 2
+  copies a run of bytes into a user buffer, re-walking each page (frames are
+  contiguous only within a leaf) and checking every frame is System RAM. A
+  kernel walk is rooted at the arch kernel table read straight from the hardware
+  root register (`CR3` / `TTBR1_EL1` / `satp`), since `init_mm` is not exported.
+- **User CLI** — `user/main.c` builds `pagewalkerctl`, which drives the ioctls,
+  resolves kernel symbols via `/proc/kallsyms`, and renders the walk report plus
+  the hexdump / CJK / raw byte output.
 
 ## Features
 
@@ -56,6 +69,23 @@ architecture is selected automatically by the kernel `CONFIG_*` / the compiler's
   re-reads the entry straight from its physical slot (`*(base + idx*8)` via
   `phys_to_virt`) and the CLI confirms it matches the value obtained through the
   page-table pointer.
+- **Byte dump** — pass a size to copy that many bytes out and render them as a
+  `hexdump -C`-style hexdump, a raw stream (`--raw`, for piping into `objdump` /
+  `xxd` / `strings`), or a CJK/UTF-8-aware hexdump (`--cjk`) whose text gutter
+  decodes multi-byte characters — even across line boundaries — and stays column
+  aligned using a locale-independent `wcwidth`, so Korean/CJK renders correctly
+  even in a bare static initramfs. Line width, grouping and case are tunable.
+- **Kernel address space** — `-k` walks and reads the kernel's own memory rooted
+  at the hardware kernel table (`CR3` / `TTBR1_EL1` / `satp`), resolving symbols
+  such as `_text`, `memblock` or `swapper_pg_dir` through `/proc/kallsyms`. The
+  same walk report is shown, labelled for the kernel root register.
+- **Fault-tolerant, non-destructive reads** — every byte is fetched with
+  `copy_from_kernel_nofault`, so an unmapped page, a hole or a bad frame
+  truncates the dump instead of faulting. Each frame is vetted with
+  `page_is_ram`, and a non-System-RAM (MMIO / reserved) page is refused by
+  default — a read is never turned into a device-register access unless
+  `--allow-mmio` is given. Reads are bounded and `cond_resched()`-paced, and the
+  module never writes target memory.
 - **Logging** — module load/unload and every request (mapped / stopped with the
   reason / rejected) are logged to the kernel ring buffer. Per-request logs are
   rate-limited, so the module stays safe under very high-frequency use.
@@ -125,16 +155,63 @@ make -C user selftest
 
 ## Usage
 
-Root is required to open the device and inspect other processes.
+Root is required: `/dev/pagewalker` is created mode `0600`, and reading another
+process's — or the kernel's — memory needs root anyway.
 
 ```bash
-sudo insmod kernel/pagewalker.ko           # creates /dev/pagewalker
-sudo ./user/pagewalkerctl <PID> <0xVADDR>
+sudo insmod kernel/pagewalker.ko                      # creates /dev/pagewalker
+sudo ./user/pagewalkerctl <pid> <address|symbol> [size]   # a process address space
+sudo ./user/pagewalkerctl -k <symbol|0xaddr> [size]       # the kernel address space
 sudo rmmod pagewalker
 ```
 
-The address accepts an optional `0x` prefix and leading zeros
-(`0x000012ff50` is read as `0x12ff50`).
+With no `size`, the tool prints the walk report only (backward compatible). With
+a `size` it appends a byte dump of the mapped memory. The address is hex (an
+optional `0x` prefix and leading zeros are fine — `0x000012ff50` is read as
+`0x12ff50`); the size is decimal by default, or `0x`/`0b`-prefixed, with an
+optional `K`/`M`/`G` suffix (`256`, `0x40`, `2K`).
+
+For a process the target may instead be the **name of a global/static symbol**
+in that process: the CLI reads `/proc/<pid>/maps` and the object's ELF symbol
+table and computes the runtime address itself (so it works under PIE / ASLR). A
+local, stack or heap variable has no symbol and cannot be resolved — the tool
+says so and asks for the runtime address (e.g. one printed with `%p`). Kernel
+symbol names differ per arch: the top-level table is `init_top_pgt` on x86-64
+and `swapper_pg_dir` on arm64.
+
+### Options
+
+| flag | effect |
+|------|--------|
+| `-k, --kernel` | target the kernel address space; the first argument is a symbol (resolved via `/proc/kallsyms`, e.g. `_text`, `memblock`, `swapper_pg_dir`) or a `0x` kernel address |
+| `-x, --hex` | hexdump with an ASCII gutter (the default) |
+| `-c, --cjk` | hexdump with a UTF-8 / CJK-aware text gutter |
+| `-r, --raw` | raw bytes to stdout for piping (refuses a TTY unless `-F`) |
+| `-w, --cols N` | bytes per line (1–256, default 16) |
+| `-g, --group N` | bytes per hex group; `0` disables grouping (default 8) |
+| `-u, --upper` | uppercase hex |
+| `--no-report` | print only the byte dump, not the walk report |
+| `--allow-mmio` | permit reads of non-System-RAM frames; **off by default**, so an MMIO / reserved page is refused rather than accessed (a device read can have a side effect) |
+
+### Reading memory
+
+```bash
+# 256 bytes of a process mapping, as a CJK-aware hexdump
+sudo ./user/pagewalkerctl 1234 0x7ffeeec18000 256 -c
+
+# a global variable by name in that process (resolved via its ELF, PIE-safe)
+sudo ./user/pagewalkerctl 1234 g_config 64
+
+# the first 64 bytes of the running kernel's text, then disassemble them
+sudo ./user/pagewalkerctl -k _text 64 --raw | objdump -D -b binary -m i386:x86-64 -
+
+# the live memblock allocator state (present on arches that keep it post-boot)
+sudo ./user/pagewalkerctl -k memblock 128
+```
+
+The dump's offset column is relative to the start address; the absolute virtual
+and physical bases (and the leaf size) are printed once in the dump banner, and
+the full translation is in the walk report above it.
 
 ### Example
 
@@ -179,7 +256,7 @@ shows `TTBR0_EL1`, and the flags use the arm64 token set; on riscv64 it reads
   Final Phys Addr: 0x1f6989460
 
 [VERIFICATION]
-  Content at Phys: 0x...
+  Content at Phys: 0x...  (u64, little-endian; bytes appear reversed in a dump)
 --------------------------------------------------------
 ```
 
