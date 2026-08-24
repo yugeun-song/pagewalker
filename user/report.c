@@ -283,19 +283,19 @@ struct level_info {
 static int select_levels(const struct pagewalker_result *res, struct level_info *levels)
 {
     const struct level_info all[5] = {
-        {"PGD", "Page Global Directory", res->pgd_idx, res->pgd_base_phys,
-         res->pgd_val, res->pgd_readback, 0, 0},
-        {"P4D", "Page 4 Directory", res->p4d_idx, res->p4d_base_phys,
-         res->p4d_val, res->p4d_readback, 0, 0},
-        {"PUD", "Page Upper Directory", res->pud_idx, res->pud_base_phys,
-         res->pud_val, res->pud_readback, 1, 0},
-        {"PMD", "Page Middle Directory", res->pmd_idx, res->pmd_base_phys,
-         res->pmd_val, res->pmd_readback, 1, 0},
-        {"PTE", "Page Table Entry", res->pte_idx, res->pte_base_phys,
-         res->pte_val, res->pte_readback, 0, 1},
+        { "PGD", "Page Global Directory", res->pgd_idx, res->pgd_base_phys,
+          res->pgd_val, res->pgd_readback, 0, 0 },
+        { "P4D", "Page 4 Directory", res->p4d_idx, res->p4d_base_phys,
+          res->p4d_val, res->p4d_readback, 0, 0 },
+        { "PUD", "Page Upper Directory", res->pud_idx, res->pud_base_phys,
+          res->pud_val, res->pud_readback, 1, 0 },
+        { "PMD", "Page Middle Directory", res->pmd_idx, res->pmd_base_phys,
+          res->pmd_val, res->pmd_readback, 1, 0 },
+        { "PTE", "Page Table Entry", res->pte_idx, res->pte_base_phys,
+          res->pte_val, res->pte_readback, 0, 1 },
     };
-    int use[5] = {1, res->paging_level >= PAGING_LEVEL_5,
-                  res->paging_level >= PAGING_LEVEL_4, 1, 1};
+    int use[5] = { 1, res->paging_level >= PAGING_LEVEL_5,
+                   res->paging_level >= PAGING_LEVEL_4, 1, 1 };
     int n = 0;
     int i;
 
@@ -389,7 +389,7 @@ static int emit_row(char *buf, int off, const char *label, int labelw,
 /* Format a byte count as an exact binary-unit string (e.g. "2 MiB", "64 KiB"). */
 void human_size(char *out, size_t cap, unsigned long long bytes)
 {
-    static const char *unit[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+    static const char *unit[] = { "B", "KiB", "MiB", "GiB", "TiB" };
     unsigned long long v = bytes;
     int u = 0;
 

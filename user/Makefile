@@ -7,8 +7,8 @@ TARGET = pagewalkerctl
 SELFTEST = selftest
 
 # The CLI links every unit; the self-test needs only the report renderer.
-CLI_SRC = main.c report.c dump.c symbols.c read.c
-SELFTEST_SRC = selftest.c report.c
+CLI_SRC = pagewalkerctl.c report.c dump.c symbols.c read.c
+SELFTEST_SRC = selftest.c
 
 .PHONY: all selftest clean
 

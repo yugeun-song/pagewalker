@@ -20,3 +20,5 @@ AlignConsecutiveShortCaseStatements:
   AcrossComments: false
 PointerAlignment: Right
 SpaceAfterCStyleCast: false
+# Spaces inside braced initializers: { a, b } rather than {a, b}.
+Cpp11BracedListStyle: false

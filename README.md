@@ -1,5 +1,12 @@
 # pagewalker
 
+> **Security warning — read this first.**
+> With root, this tool reads almost any kernel memory and any process's memory —
+> highly sensitive data (keys, credentials, kernel internals) with near-complete
+> freedom. Run it **only in an isolated, disposable environment**; a QEMU / VM
+> guest is strongly recommended. Do not run it on a production, shared, or
+> multi-tenant host.
+
 `pagewalker` is a Linux kernel module and a user-space CLI that walk the page
 tables of any running process and show, step by step, how a virtual address is
 translated into a physical one. It exposes the raw paging structures
@@ -20,9 +27,26 @@ the PTE flag decode) is isolated behind a small `#ifdef`/arch helper. The
 architecture is selected automatically by the kernel `CONFIG_*` / the compiler's
 `__x86_64__` / `__aarch64__` / `__riscv` macros.
 
+## Supported architectures
+
+Only **x86-64, arm64, and riscv64** are built (a compile-time `#error` rejects
+anything else; 32-bit is out of scope). The walk itself is architecture-neutral,
+so each arch supports every leaf level its hardware defines:
+
+- **x86-64** — user-space and kernel-space (`-k`) walks; 4- and 5-level (LA57)
+  paging; leaves at 4 KiB (PTE), 2 MiB (PMD) and 1 GiB (PUD). The ISA has no
+  64 KiB page and no P4D-level block.
+- **arm64** — user-space and kernel-space walks (kernels with a ≤48-bit physical
+  address width; see **Limitations**); 4 KiB granule, with leaves at 4 KiB (PTE),
+  2 MiB (PMD) and 1 GiB (PUD), plus the 64 KiB cont-PTE and 32 MiB cont-PMD
+  contiguous encodings. No P4D-level block.
+- **riscv64** — user-space and kernel-space walks; Sv39 / Sv48 / Sv57 paging;
+  leaves at 4 KiB (PTE), 2 MiB (PMD) and 1 GiB (PUD), the 64 KiB NAPOT contiguous
+  encoding, and the 512 GiB P4D terapage on Sv48+.
+
 ## Components
 
-- **Kernel module** — `kernel/` builds `pagewalker.ko` from `main.c` (character
+- **Kernel module** — `kernel/` builds `pagewalker.ko` from `pagewalker_main.c` (character
   device + `ioctl` dispatch), `walk.c` (the architecture-neutral page-table
   walk), and `read.c` (bulk read), with the per-arch specifics isolated in
   `arch.h`. It walks the
@@ -35,7 +59,7 @@ architecture is selected automatically by the kernel `CONFIG_*` / the compiler's
   contiguous only within a leaf) and checking every frame is System RAM. A
   kernel walk is rooted at the arch kernel table read straight from the hardware
   root register (`CR3` / `TTBR1_EL1` / `satp`), since `init_mm` is not exported.
-- **User CLI** — `user/` builds `pagewalkerctl` from `main.c` (argument handling
+- **User CLI** — `user/` builds `pagewalkerctl` from `pagewalkerctl.c` (argument handling
   and dispatch), `report.c` (the walk report and per-arch flag decode), `dump.c`
   (hexdump / CJK gutter), `symbols.c` (kernel `/proc/kallsyms` and userspace ELF
   symbol resolution), and `read.c` (the command-2 driver). It drives the ioctls,
@@ -52,14 +76,18 @@ architecture is selected automatically by the kernel `CONFIG_*` / the compiler's
   register and what it points to: `CR3` (x86-64), `TTBR0_EL1` (arm64, the user
   half; `TTBR1_EL1` covers the kernel half), or `satp` (riscv, with its `Sv`
   MODE). The base value is `virt_to_phys(mm->pgd)` on every arch.
-- **Huge pages, every size, every arch** — the leaf can sit at any level and the
+- **Huge pages at every level the arch defines** — on the three supported
+  architectures the leaf can sit at PTE, PMD or PUD (and P4D on riscv), and the
   module reports the *true* mapped span: 4 KiB (PTE), 2 MiB (PMD), 1 GiB (PUD),
-  the 512 GiB P4D terapage, **and the architecture's contiguous encodings** —
+  **plus the architecture's contiguous encodings** —
   arm64 cont-PTE (64 KiB) / cont-PMD (32 MiB) and riscv NAPOT (64 KiB). The size
   comes from the arch's own `*_leaf_size()` accessors, so the reported physical
   base and offset stay correct even for a contiguous / NAPOT page whose span
   exceeds the base granule (a plain `~PAGE_MASK` would drop the high offset bits,
-  e.g. `va[15:12]` of a riscv 64 KiB NAPOT page). Resident PROT_NONE /
+  e.g. `va[15:12]` of a riscv 64 KiB NAPOT page). A P4D-level leaf is handled
+  generically too — a RISC-V Sv48+ 512 GiB terapage; x86-64 and arm64 define no
+  P4D block — though the self-test's largest exercised case is the 1 GiB PUD
+  page. Resident PROT_NONE /
   NUMA-balancing huge entries stay valid; swap / migration huge entries are
   rejected. The result carries `page_size`, `mapping_level` (PTE/PMD/PUD/P4D) and
   `is_contiguous`; the report prints a `Mapped Page: <size> (leaf at <level>
@@ -98,27 +126,12 @@ architecture is selected automatically by the kernel `CONFIG_*` / the compiler's
 - **Robust input handling** — PID-range and canonical-address checks; POSIX errno
   (`ESRCH`, `EINVAL`, `EADDRNOTAVAIL`) mapped to clear CLI messages.
 
-## Verified under QEMU
+## Self-test
 
-The self-test (`make -C user selftest`) boots as PID 1 init in QEMU against the
-prebuilt 6.12 research kernels and walks a known 4K / 64K / 2M / 1G mapping on
-each arch. For every case it checks the reported `page_size`, `mapping_level`,
-`is_contiguous`, and that the physical content read back equals the sentinel it
-wrote — at an offset *above* the base granule, so a contiguous / NAPOT page
-genuinely exercises the wide offset:
-
-```
- case   x86-64        arm64                 riscv64
- ----   -----------   -------------------   -----------------
- 4K     PTE           PTE                   PTE
- 64K    n/a           PTE (cont-PTE)        PTE (NAPOT)
- 2M     PMD           PMD                   PMD
- 1G     PUD           PUD                   PUD
-```
-
-All applicable cases pass on all three arches (64 KiB has no x86-64 hugetlb
-size, so it is reported as skipped there). riscv64 is run with QEMU
-`-cpu rv64,svnapot=true` so the 64 KiB case maps through a NAPOT PTE.
+`make -C user selftest` builds a static, granule-agnostic diagnostic. Run as PID
+1 in a QEMU guest it reports the environment and probes the base page, every
+hugepage size the kernel exposes, a kernel-space `_text` read, and unmapped /
+non-canonical edge cases — adapting to any arch, granule and paging depth.
 
 ## Project Structure
 
@@ -126,13 +139,14 @@ size, so it is reported as skipped there). riscv64 is run with QEMU
 pagewalker/
 ├── include/pagewalker_common.h   # shared ioctl ABI (request / result, macros)
 ├── kernel/                       # module -> pagewalker.ko
-│   ├── main.c                    #   character device + ioctl dispatch
+│   ├── pagewalker_main.c         #   character device + ioctl dispatch
 │   ├── walk.c                    #   architecture-neutral page-table walk
 │   ├── read.c                    #   bulk read (command 2) + System-RAM gate
 │   ├── arch.h                    #   per-arch layer (root register, level fold)
 │   └── pagewalker.h              #   internal cross-file interface
 ├── user/                         # CLI -> pagewalkerctl
-│   ├── main.c                    #   argument handling + dispatch
+│   ├── pagewalkerctl.c           #   argument handling + dispatch
+│   ├── pagewalkerctl.h           #   CLI umbrella header (includes, out_fmt)
 │   ├── report.c                  #   walk report + per-arch flag decode
 │   ├── dump.c                    #   hexdump / CJK-aware gutter
 │   ├── symbols.c                 #   /proc/kallsyms + userspace ELF resolution
@@ -193,6 +207,11 @@ optional `K`/`M`/`G` suffix (`256`, `0x40`, `2K`).
 For a process the target may instead be the **name of a global/static symbol**
 in that process: the CLI reads `/proc/<pid>/maps` and the object's ELF symbol
 table and computes the runtime address itself (so it works under PIE / ASLR).
+Each object is opened through `/proc/<pid>/root/…` (the target's own filesystem
+view), so resolution stays correct when the target is in a container or a
+different mount namespace, and a trailing ` (deleted)` tag is stripped. If none
+of the target's objects can be opened, the tool says so and asks for the runtime
+address instead.
 
 Resolution reads `.symtab` first, then `.dynsym`. So to reference a variable by
 name, build the program so the variable has an ELF symbol:
@@ -283,7 +302,8 @@ the full translation is in the walk report above it.
 
 ### Example
 
-This sample is from x86-64. On arm64 the report header reads `arm64`, Step 0
+This sample is a real self-test capture on x86-64 (its target runs as PID 1).
+On arm64 the report header reads `arm64`, Step 0
 shows `TTBR0_EL1`, and the flags use the arm64 token set; on riscv64 it reads
 `riscv64`, shows `satp` with its `Sv` MODE, the `V R W X U G A D` flags, and a
 3-row (Sv39) / 4-row (Sv48) / 5-row (Sv57) breakdown.
@@ -292,39 +312,71 @@ shows `TTBR0_EL1`, and the flags use the arm64 token set; on riscv64 it reads
 =========================================================
  x86-64 Page Table Walk Report
 =========================================================
- Target PID   : 1234
- Target VAddr : 0x00007ffeeec18460
+ Target PID   : 1
+ Target VAddr : 0x00007ff039bb7000
  Paging Mode  : 4-Level Paging (VA 48-bit, page 4 KiB)
 +------+------------------+-----------+-----------+-----------+-----------+--------------+
 | Bits |      63-48       |   47-39   |   38-30   |   29-21   |   20-12   |     11-0     |
 +------+------------------+-----------+-----------+-----------+-----------+--------------+
 | IDX  |    Extension     |    PGD    |    PUD    |    PMD    |    PTE    |    offset    |
-| VAL  |      0x0000      |   0x0ff   |   0x1fb   |   0x176   |   0x018   |    0x460     |
-| BIN  | 0000000000000000 | 011111111 | 111111011 | 101110110 | 000011000 | 010001100000 |
+| VAL  |      0x0000      |   0x0ff   |   0x1c0   |   0x1cd   |   0x1b7   |    0x000     |
+| BIN  | 0000000000000000 | 011111111 | 111000000 | 111001101 | 110110111 | 000000000000 |
 +------+------------------+-----------+-----------+-----------+-----------+--------------+
 
- Target VAddr (64-bit, MSB -> LSB): 0x00007ffeeec18460
-      -> 0000000000000000   011111111   111111011   101110110   000011000   010001100000
+ Target VAddr (64-bit, MSB -> LSB): 0x00007ff039bb7000
+      -> 0000000000000000   011111111   111000000   111001101   110110111   000000000000
 
 === Translation Steps ===
-...
+
+[Step 0: CR3 Register]
+  Physical Addr : 0x100fe0000
+  Description   : CR3 holds the PGD/PML4 physical base; one root maps both the user and kernel halves.
+
+[Step 1: PGD (Page Global Directory)]
+  Table Base  : 0x100fe0000
+  Index       : 0xff (255)
+  Calculation : 0x100fe0000 + (0xff * 8) = 0x100fe07f8
+  Entry Value : 0x101e83067
+  Verify      : *(0x100fe07f8) == 0x101e83067  [kernel read-back OK]
+  Flags       : P RW U A X
+  Status      : Valid (Present)
+
+[Step 2: PUD (Page Upper Directory)]
+  Table Base  : 0x101e83000
+  Index       : 0x1c0 (448)
+  Calculation : 0x101e83000 + (0x1c0 * 8) = 0x101e83e00
+  Entry Value : 0x101e74067
+  Verify      : *(0x101e83e00) == 0x101e74067  [kernel read-back OK]
+  Flags       : P RW U A X
+  Status      : Valid (Present)
+
+[Step 3: PMD (Page Middle Directory)]
+  Table Base  : 0x101e74000
+  Index       : 0x1cd (461)
+  Calculation : 0x101e74000 + (0x1cd * 8) = 0x101e74e68
+  Entry Value : 0x101e68067
+  Verify      : *(0x101e74e68) == 0x101e68067  [kernel read-back OK]
+  Flags       : P RW U A X
+  Status      : Valid (Present)
+
 [Step 4: PTE (Page Table Entry)]
-  Table Base  : 0x285426000
-  Index       : 0x18 (24)
-  Calculation : 0x285426000 + (0x18 * 8) = 0x2854260c0
-  Entry Value : 0x80000001f6989867
-  Verify      : *(0x2854260c0) == 0x80000001f6989867  [kernel read-back OK]
+  Table Base  : 0x101e68000
+  Index       : 0x1b7 (439)
+  Calculation : 0x101e68000 + (0x1b7 * 8) = 0x101e68db8
+  Entry Value : 0x8000000277d9f067
+  Verify      : *(0x101e68db8) == 0x8000000277d9f067  [kernel read-back OK]
   Flags       : P RW U A D NX
   Status      : Valid (Present)
+
 --------------------------------------------------------
 [FINAL RESULT]
   Mapped Page    : 4 KiB  (leaf at PTE)
-  Page Base Phys : 0x1f6989000
-  Offset         : 0x460
-  Final Phys Addr: 0x1f6989460
+  Page Base Phys : 0x277d9f000
+  Offset         : 0x0
+  Final Phys Addr: 0x277d9f000
 
 [VERIFICATION]
-  Content at Phys: 0x...  (u64, little-endian; bytes appear reversed in a dump)
+  Content at Phys: 0xcafebabedeadbeef  (u64, little-endian; bytes appear reversed in a dump)
 --------------------------------------------------------
 ```
 
@@ -342,6 +394,27 @@ sudo ./user/pagewalkerctl -1 0x1000
 ```
 
 A non-existent PID or a non-canonical address is reported and the tool exits.
+
+## Limitations
+
+- **arm64 52-bit PA (LPA2)** — a kernel-space (`-k`) walk reads the root from
+  `TTBR1_EL1` and masks to bit 47, which is correct only for a kernel with a
+  ≤48-bit physical address width (the tested config). On a kernel built for
+  52-bit PA (`CONFIG_ARM64_PA_BITS_52`, i.e. FEAT_LPA / LPA2) the high PA bits
+  would be dropped, so rather than return a wrong result the kernel walk is
+  **refused with an explicit `-EOPNOTSUPP`** (the CLI prints a clear message).
+  User-space walks are unaffected.
+- **Minimum kernel** — the module uses the modern typed accessors (`pgdp_get`,
+  `pmdp_get_lockless`, `ptep_get`) and the `pXd_leaf` / `pXd_leaf_size` helpers,
+  so it expects a reasonably recent kernel (roughly 6.x); an older headers tree
+  may fail to build.
+- **Unsigned out-of-tree module** — `pagewalker.ko` is not signed. On a host
+  enforcing Secure Boot / `MODULE_SIG_FORCE` / kernel lockdown, `insmod` rejects
+  it. Sign it and enrol a MOK, or disable enforcement, per your distro and
+  kernel; this is left to the operator.
+- **MMIO in a process walk** — `--allow-mmio` returns real bytes only on the
+  kernel path (`-k`). For a process address a non-RAM frame is read through the
+  direct map and faults, so the run stops with a fault instead of returning data.
 
 ## Kernel Logs
 

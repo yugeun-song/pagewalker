@@ -61,13 +61,16 @@ int resolve_ksym(const char *arg, unsigned long long *out)
  * symbol's link-time address) and *load_vaddr (the p_vaddr of the PT_LOAD that
  * covers file offset 0, i.e. the object's link base) and returns 1. Searches
  * .symtab first, then .dynsym. Every offset is bounds-checked against the mapped
- * size so a truncated or malformed file cannot walk off the end. Returns 0 if
- * the symbol is absent or the file is not a usable ELF64 object.
+ * size so a truncated or malformed file cannot walk off the end. *opened is set
+ * to 1 when the file was reachable and mapped, so the caller can tell a truly-
+ * missing symbol from an object it simply could not open. Returns 0 if the
+ * symbol is absent or the file is not a usable ELF64 object.
  */
 static int elf_lookup(const char *path, const char *name,
-                      unsigned long long *st_value, unsigned long long *load_vaddr)
+                      unsigned long long *st_value, unsigned long long *load_vaddr,
+                      int *opened)
 {
-    int fd = open(path, O_RDONLY);
+    int fd;
     struct stat file_stat;
     const unsigned char *base;
     const Elf64_Ehdr *elf_header;
@@ -75,6 +78,8 @@ static int elf_lookup(const char *path, const char *name,
     int found = 0;
     unsigned i;
 
+    *opened = 0;
+    fd = open(path, O_RDONLY);
     if (fd < 0) {
         return 0;
     }
@@ -88,6 +93,7 @@ static int elf_lookup(const char *path, const char *name,
     if (base == MAP_FAILED) {
         return 0;
     }
+    *opened = 1; /* the object is reachable and mapped */
 
     elf_header = (const Elf64_Ehdr *)base;
     if (memcmp(elf_header->e_ident, ELFMAG, SELFMAG) != 0 ||
@@ -182,6 +188,7 @@ int resolve_user_sym(unsigned int pid, const char *name,
     char line[4096];
     char seen[64][512];
     int nseen = 0;
+    int opened_any = 0;
     FILE *f;
     int i;
 
@@ -195,12 +202,20 @@ int resolve_user_sym(unsigned int pid, const char *name,
     /*
      * Collect the offset-0 mapping (the load base) of each distinct file-backed
      * object. That mapping's start minus the object's link base is the load bias.
+     * Each object is opened through /proc/<pid>/root/<path>, i.e. the TARGET's own
+     * filesystem view, so resolution stays correct when the target lives in a
+     * different mount namespace / container / chroot. The bare caller-view path is
+     * only a last-resort fallback if the rooted path cannot be opened.
      */
     while (fgets(line, sizeof(line), f)) {
         unsigned long long start, end, off;
         char perms[8];
         char path[512];
+        char rooted[600];
         unsigned long long st_value, load_vaddr;
+        size_t plen;
+        int opened = 0;
+        int hit;
 
         path[0] = '\0';
         if (sscanf(line, "%llx-%llx %7s %llx %*x:%*x %*u %511[^\n]",
@@ -209,6 +224,12 @@ int resolve_user_sym(unsigned int pid, const char *name,
         }
         if (off != 0 || path[0] != '/') {
             continue;
+        }
+
+        /* A deleted / replaced mapping reads "<path> (deleted)"; drop that tag. */
+        plen = strlen(path);
+        if (plen > 10 && strcmp(path + plen - 10, " (deleted)") == 0) {
+            path[plen - 10] = '\0';
         }
 
         /* Skip a path already tried (an object has one offset-0 mapping anyway). */
@@ -224,7 +245,15 @@ int resolve_user_sym(unsigned int pid, const char *name,
             snprintf(seen[nseen++], sizeof(seen[0]), "%s", path);
         }
 
-        if (elf_lookup(path, name, &st_value, &load_vaddr)) {
+        /* Preset: the target's own filesystem view; fallback: the caller's. */
+        snprintf(rooted, sizeof(rooted), "/proc/%u/root%s", pid, path);
+        hit = elf_lookup(rooted, name, &st_value, &load_vaddr, &opened);
+        if (!hit && !opened) {
+            hit = elf_lookup(path, name, &st_value, &load_vaddr, &opened);
+        }
+        opened_any |= opened;
+
+        if (hit) {
             *out = st_value + start - load_vaddr;
             fclose(f);
             return 0;
@@ -232,10 +261,19 @@ int resolve_user_sym(unsigned int pid, const char *name,
     }
     fclose(f);
 
-    snprintf(errbuf, errcap,
-             "symbol '%s' not found in PID %u's objects; a local/stack/heap "
-             "variable has no symbol - pass its runtime address (e.g. printed "
-             "with %%p)",
-             name, pid);
+    if (opened_any) {
+        snprintf(errbuf, errcap,
+                 "symbol '%s' not found in PID %u's objects; a local/stack/heap "
+                 "variable has no symbol - pass its runtime address (e.g. printed "
+                 "with %%p)",
+                 name, pid);
+    } else {
+        snprintf(errbuf, errcap,
+                 "could not open any of PID %u's object files (different mount "
+                 "namespace / container / chroot, or a deleted/replaced binary?) - "
+                 "pass the variable's runtime address (e.g. printed with %%p), or "
+                 "run from within the target's namespace",
+                 pid);
+    }
     return 1;
 }

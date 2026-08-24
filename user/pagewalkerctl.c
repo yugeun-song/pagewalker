@@ -10,20 +10,7 @@
 #include <ctype.h>
 #include <getopt.h>
 
-#include "../include/pagewalker_common.h"
-#include "report.h"
-#include "dump.h"
-#include "symbols.h"
-#include "read.h"
-
-#define PID_MAX_FILE "/proc/sys/kernel/pid_max"
-#define DEFAULT_PID_MAX 32768
-#define BASE_DECIMAL 10
-
-/* Output rendering for the byte dump, selected on the command line. */
-enum out_fmt { FMT_HEX,
-               FMT_RAW,
-               FMT_CJK };
+#include "pagewalkerctl.h"
 
 static void print_usage(const char *prog_name)
 {
@@ -63,10 +50,10 @@ static void print_usage(const char *prog_name)
 static unsigned int get_system_pid_max(void)
 {
     FILE *f = fopen(PID_MAX_FILE, "r");
-    unsigned int max = DEFAULT_PID_MAX;
+    unsigned int max = PID_MAX_FALLBACK;
     if (f) {
         if (fscanf(f, "%u", &max) != 1) {
-            max = DEFAULT_PID_MAX;
+            max = PID_MAX_FALLBACK;
         }
         fclose(f);
     }
@@ -95,19 +82,20 @@ int main(int argc, char *argv[])
     enum { OPT_ALLOW_MMIO = 1000,
            OPT_NO_REPORT };
     static struct option long_options[] = {
-        {"help", no_argument, 0, 'h'},
-        {"kernel", no_argument, 0, 'k'},
-        {"raw", no_argument, 0, 'r'},
-        {"hex", no_argument, 0, 'x'},
-        {"cjk", no_argument, 0, 'c'},
-        {"force", no_argument, 0, 'F'},
-        {"upper", no_argument, 0, 'u'},
-        {"format", required_argument, 0, 'f'},
-        {"cols", required_argument, 0, 'w'},
-        {"group", required_argument, 0, 'g'},
-        {"allow-mmio", no_argument, 0, OPT_ALLOW_MMIO},
-        {"no-report", no_argument, 0, OPT_NO_REPORT},
-        {0, 0, 0, 0}};
+        { "help", no_argument, 0, 'h' },
+        { "kernel", no_argument, 0, 'k' },
+        { "raw", no_argument, 0, 'r' },
+        { "hex", no_argument, 0, 'x' },
+        { "cjk", no_argument, 0, 'c' },
+        { "force", no_argument, 0, 'F' },
+        { "upper", no_argument, 0, 'u' },
+        { "format", required_argument, 0, 'f' },
+        { "cols", required_argument, 0, 'w' },
+        { "group", required_argument, 0, 'g' },
+        { "allow-mmio", no_argument, 0, OPT_ALLOW_MMIO },
+        { "no-report", no_argument, 0, OPT_NO_REPORT },
+        { 0, 0, 0, 0 }
+    };
 
     while ((opt = getopt_long(argc, argv, "hkrxcFuf:w:g:", long_options, NULL)) != -1) {
         switch (opt) {
@@ -177,7 +165,10 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
         if (r == 2) {
-            fprintf(stderr, "Error: '%s' resolves to 0 (kptr_restrict hides it; run as root).\n",
+            fprintf(stderr,
+                    "Error: '%s' resolves to 0 (kernel.kptr_restrict hides symbol addresses). "
+                    "Run as root; if kptr_restrict=2 even root is blocked, so lower it or pass "
+                    "-k 0x<address> directly.\n",
                     argv[optind]);
             return EXIT_FAILURE;
         }
@@ -275,7 +266,7 @@ int main(int argc, char *argv[])
     if (fd < 0) {
         switch (errno) {
         case EACCES:
-            fprintf(stderr, "Error: cannot open %s: Permission denied (try sudo).\n",
+            fprintf(stderr, "Error: cannot open %s: Permission denied (run as root, e.g. with sudo).\n",
                     PAGEWALKER_PATH);
             break;
         case ENOENT:
@@ -347,6 +338,11 @@ int main(int argc, char *argv[])
                 break;
             case EINVAL:
                 fprintf(stderr, "Error: PID %u is out of range.\n", pid);
+                break;
+            case EOPNOTSUPP:
+                fprintf(stderr,
+                        "Error: kernel-space walk is not supported on this arm64 "
+                        "configuration (52-bit PA / LPA2).\n");
                 break;
             default:
                 errno = -r;

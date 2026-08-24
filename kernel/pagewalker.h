@@ -8,12 +8,12 @@
 #include "../include/pagewalker_common.h"
 
 #define RET_SUCCESS 0
-#define BIT_IS_SET  1
-#define ENTRY_SIZE  8	/* page-table entry is 8 bytes on every 64-bit arch */
+#define BIT_IS_SET 1
+#define ENTRY_SIZE 8 /* page-table entry is 8 bytes on every 64-bit arch */
 
 /*
  * Cross-file interface of the module. The walk engine lives in walk.c, the bulk
- * read in read.c, and the character device / ioctl glue in main.c.
+ * read in read.c, and the character device / ioctl glue in pagewalker_main.c.
  */
 
 /* walk.c */

@@ -82,6 +82,10 @@ int perform_read(struct pagewalker_read_request *rr)
 	/* Full walk of the START address, for the report the CLI still prints. */
 	if (kernel) {
 		kpgd = arch_kernel_pgd();
+		if (!kpgd) {
+			ret = -EOPNOTSUPP;
+			goto out;
+		}
 		perform_kernel_walk(&rr->info);
 	} else {
 		pw_set_geometry(&rr->info);

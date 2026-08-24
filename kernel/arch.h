@@ -100,7 +100,20 @@ static inline pgd_t *arch_kernel_pgd(void)
 {
 	u64 ttbr1 = read_sysreg(ttbr1_el1);
 
+#if defined(CONFIG_ARM64_PA_BITS_52)
+	/*
+	 * Hard guard: on a 52-bit-PA kernel (FEAT_LPA / FEAT_LPA2) the pgd base's
+	 * high physical-address bits [51:48] are encoded in TTBR1 outside the
+	 * [47:12] field this mask keeps, so the extraction would silently drop them
+	 * and yield a wrong root. Refuse the kernel walk (return NULL) rather than
+	 * return wrong data; the caller maps NULL to an explicit -EOPNOTSUPP. This
+	 * is compile-time, so an ordinary 48-bit-PA kernel is unaffected.
+	 */
+	(void)ttbr1;
+	return NULL;
+#else
 	return (pgd_t *)__va(ttbr1 & GENMASK_ULL(47, PAGE_SHIFT));
+#endif
 }
 
 /* arm64 folds the upper levels inline, so the generic accessors are module-safe. */
@@ -119,12 +132,12 @@ static inline int arch_paging_level(void)
 		return PAGING_LEVEL_5;
 	if (pgtable_l4_enabled)
 		return PAGING_LEVEL_4;
-	return PAGING_LEVEL_3;		/* Sv39 */
+	return PAGING_LEVEL_3; /* Sv39 */
 }
 
 static inline unsigned int arch_va_bits(void)
 {
-	return (unsigned int)VA_BITS;	/* Sv39/48/57 selected at runtime */
+	return (unsigned int)VA_BITS; /* Sv39/48/57 selected at runtime */
 }
 
 static inline u64 arch_entry_to_table_phys(u64 entry_val)
@@ -178,7 +191,7 @@ static inline bool arch_addr_representable(unsigned long vaddr, unsigned int va_
 #if defined(CONFIG_ARM64)
 	return (untagged_addr(vaddr) >> va_bits) == 0;
 #else
-	unsigned long mask = ~((1UL << va_bits) - 1);	/* bits [va_bits, 63] */
+	unsigned long mask = ~((1UL << va_bits) - 1); /* bits [va_bits, 63] */
 	unsigned long sign_bit = (vaddr >> (va_bits - 1)) & 1;
 	unsigned long upper = vaddr & mask;
 

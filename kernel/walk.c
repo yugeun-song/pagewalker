@@ -344,7 +344,7 @@ int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	put_task_struct(task);
 	if (!mm) {
 		pr_info_ratelimited("pid %d: rejected (no mm: kernel thread or exiting)\n", pid);
-		return -ESRCH;		/* kernel thread or exiting task: no mm */
+		return -ESRCH; /* kernel thread or exiting task: no mm */
 	}
 
 	mmap_read_lock(mm);
@@ -371,10 +371,17 @@ int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 int perform_kernel_walk(struct pagewalker_result *res)
 {
 	unsigned long vaddr = res->target_vaddr;
+	pgd_t *root = arch_kernel_pgd();
 	const char *reason;
 
 	pw_set_geometry(res);
-	reason = pw_walk_levels(NULL, arch_kernel_pgd(), res);
+	if (!root) {
+		res->is_valid = 0;
+		pr_info_ratelimited("kernel vaddr 0x%lx: rejected (kernel walk unsupported on this arm64 PA config)\n",
+				    vaddr);
+		return RET_SUCCESS;
+	}
+	reason = pw_walk_levels(NULL, root, res);
 
 	if (res->is_valid)
 		pr_info_ratelimited("kernel vaddr 0x%lx -> phys 0x%llx [%s]\n",

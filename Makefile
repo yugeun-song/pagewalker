@@ -1,6 +1,8 @@
 .PHONY: all clean tags cscope user kernel
 
-all: kernel user tags cscope
+# The default build produces only the binaries (module + CLI). Build the source
+# indexes explicitly with `make tags cscope`; `make clean` removes them regardless.
+all: kernel user
 
 kernel:
 	$(MAKE) -C kernel
