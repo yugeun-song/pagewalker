@@ -406,5 +406,11 @@ cleanup:
     if (fd >= 0) {
         close(fd);
     }
+    /* A truncated or failed write (full pipe, closed reader, disk full) must not
+     * be reported as success; fflush surfaces a deferred stdio write error. */
+    if (ret_code == EXIT_SUCCESS && fflush(stdout) != 0) {
+        perror("write");
+        ret_code = EXIT_FAILURE;
+    }
     return ret_code;
 }

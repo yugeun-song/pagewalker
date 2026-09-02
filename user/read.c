@@ -131,6 +131,7 @@ int do_read(int fd, int kernel, int allow_mmio, unsigned int pid,
         rr.ubuf = (unsigned long long)(uintptr_t)(buf + done);
 
         if (ioctl(fd, PAGEWALKER_IOC_READ, &rr) < 0) {
+            *out_got = done; /* report bytes already copied before the failure */
             return -errno;
         }
 
