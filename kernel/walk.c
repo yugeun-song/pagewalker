@@ -73,9 +73,13 @@ static void read_physical_content(struct pagewalker_result *res)
 	 * region or a hole inside an otherwise-present section). The actual
 	 * fault-safety comes from copy_from_kernel_nofault() below, which catches
 	 * a bad access instead of panicking. We validate the EXACT pfn we read
-	 * (final_phys_addr), which for a huge page differs from the page base.
+	 * (final_phys_addr), which for a huge page differs from the page base, and
+	 * additionally gate on page_is_ram() so this single-u64 verification read is
+	 * never turned into an MMIO/device-register access (the same hazard the bulk
+	 * read refuses by default).
 	 */
-	if (!pfn_valid(PHYS_PFN(res->final_phys_addr))) {
+	if (!pfn_valid(PHYS_PFN(res->final_phys_addr)) ||
+	    !page_is_ram(PHYS_PFN(res->final_phys_addr))) {
 		res->value_at_phys = 0xffffffffffffffff;
 		return;
 	}
@@ -144,6 +148,26 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 	pud_t pude;
 	pmd_t pmde;
 	pte_t pte_entry;
+
+	/*
+	 * Anchor a process walk to a live VMA. munmap()/mremap()/brk-shrink detach
+	 * VMAs under mmap_write_lock, then mmap_write_downgrade() and run
+	 * free_pgtables() under the read lock - concurrently with a reader that also
+	 * holds mmap_read_lock. Holding the read lock therefore does NOT exclude the
+	 * teardown. But the detach happens under the write lock, so either we hold
+	 * the read lock first (the writer blocks until we finish) or the VMA is
+	 * already gone from the tree when we look it up here; confirming a VMA still
+	 * covers vaddr keeps the walk off page tables being freed. free_pgtables'
+	 * floor/ceiling never cross a live neighbouring VMA, so a covered address's
+	 * tables stay put. A kernel walk (mm == NULL) has no VMAs and is rooted at
+	 * stable tables, so it skips this.
+	 */
+	if (mm) {
+		struct vm_area_struct *vma = find_vma(mm, vaddr);
+
+		if (!vma || vaddr < vma->vm_start)
+			return "no VMA covers this address";
+	}
 
 	/*
 	 * Root page-table base = the value programmed into the arch root
@@ -444,9 +468,12 @@ int perform_read(struct pagewalker_read_request *rr)
 	memset(&rr->info, 0, sizeof(rr->info));
 	rr->info.target_vaddr = vaddr;
 
-	/* Clamp to the per-call ceiling; the CLI loops for a larger dump. */
-	if (size > PW_READ_MAX)
+	/* Clamp to the per-call ceiling; the CLI loops for a larger dump. A direct
+	 * ioctl caller learns it was clamped via PW_STOP_TOOBIG. */
+	if (size > PW_READ_MAX) {
 		size = PW_READ_MAX;
+		rr->stopped = PW_STOP_TOOBIG;
+	}
 
 	/* Resolve the target process address space (kernel mode needs none). */
 	if (!kernel) {
@@ -468,6 +495,21 @@ int perform_read(struct pagewalker_read_request *rr)
 			return -ESRCH;
 	}
 
+	/*
+	 * Reject a non-representable start address for a process read, matching the
+	 * single-address command (which returns -EADDRNOTAVAIL); reported here via
+	 * PW_STOP_NONCANON so a caller sees the reason instead of a masked alias. A
+	 * kernel read targets the high half, which is not user-canonical, so it is
+	 * not checked - an out-of-range kernel address simply walks to "not mapped".
+	 */
+	if (!kernel) {
+		pw_set_geometry(&rr->info);
+		if (!arch_addr_representable(vaddr, rr->info.va_bits)) {
+			rr->stopped = PW_STOP_NONCANON;
+			goto out;
+		}
+	}
+
 	/* Full walk of the START address, for the report the CLI still prints. */
 	if (kernel) {
 		kpgd = arch_kernel_pgd();
@@ -477,7 +519,6 @@ int perform_read(struct pagewalker_read_request *rr)
 		}
 		perform_kernel_walk(&rr->info);
 	} else {
-		pw_set_geometry(&rr->info);
 		mmap_read_lock(mm);
 		pw_walk_levels(mm, mm->pgd, &rr->info);
 		mmap_read_unlock(mm);
