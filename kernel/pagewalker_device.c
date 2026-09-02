@@ -9,7 +9,7 @@
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 
-#include "pagewalker.h"
+#include "walk.h"
 
 static long pagewalker_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 
@@ -50,7 +50,7 @@ static long pagewalker_get_info(unsigned long arg)
 
 	if (copy_to_user((void __user *)arg, &req, sizeof(req)))
 		return -EFAULT;
-	return RET_SUCCESS;
+	return 0;
 }
 
 /* Command 2: copy a run of bytes and report the walk of its start address. */
