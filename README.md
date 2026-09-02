@@ -46,13 +46,16 @@ so each arch supports every leaf level its hardware defines:
 
 ## Components
 
-- **Kernel module** — `kernel/` builds `pagewalker.ko` from `pagewalker_main.c` (character
-  device + `ioctl` dispatch), `walk.c` (the architecture-neutral page-table
-  walk), and `read.c` (bulk read), with the per-arch specifics isolated in
-  `arch.h`. It walks the
-  target PID's page tables under `mmap_read_lock`, snapshots each level with the
-  modern typed accessors (`pgdp_get`, `pmdp_get_lockless`, `ptep_get`), and
-  serialises the PTE step with `pmd_lock` against khugepaged / `MADV_COLLAPSE`.
+- **Kernel module** — `kernel/` builds `pagewalker.ko` from `pagewalker_device.c`
+  (character device + `ioctl` dispatch, the module entry) and `walk.c` (the
+  architecture-neutral page-table walk plus the bulk read), with the per-arch
+  specifics isolated in `arch.h`. `walk.c` owns the same-named header `walk.h` that
+  declares exactly what it implements. It walks the
+  target PID's page tables under `mmap_read_lock`, having first confirmed a live
+  VMA covers the address (so a concurrent `munmap` cannot free the tables under
+  the walk), snapshots each level with the modern typed accessors (`pgdp_get`,
+  `pmdp_get_lockless`, `ptep_get`), and serialises the PTE step with `pmd_lock`
+  against khugepaged / `MADV_COLLAPSE`.
   It exposes `/dev/pagewalker` (root-only) through two `ioctl` commands:
   command 1 resolves one address and reports the single `u64` at it; command 2
   copies a run of bytes into a user buffer, re-walking each page (frames are
@@ -118,8 +121,11 @@ so each arch supports every leaf level its hardware defines:
   truncates the dump instead of faulting. Each frame is vetted with
   `page_is_ram`, and a non-System-RAM (MMIO / reserved) page is refused by
   default — a read is never turned into a device-register access unless
-  `--allow-mmio` is given. Reads are bounded and `cond_resched()`-paced, and the
-  module never writes target memory.
+  `--allow-mmio` is given (the single-`u64` verification read is `page_is_ram`-
+  gated the same way). Reads are bounded and `cond_resched()`-paced, and the
+  module never writes target memory. A bulk read also rejects a non-representable
+  start address, reported as `PW_STOP_NONCANON`, matching the single-address
+  command's `EADDRNOTAVAIL`.
 - **Logging** — module load/unload and every request (mapped / stopped with the
   reason / rejected) are logged to the kernel ring buffer. Per-request logs are
   rate-limited, so the module stays safe under very high-frequency use.
@@ -139,11 +145,9 @@ non-canonical edge cases — adapting to any arch, granule and paging depth.
 pagewalker/
 ├── include/pagewalker_common.h   # shared ioctl ABI (request / result, macros)
 ├── kernel/                       # module -> pagewalker.ko
-│   ├── pagewalker_main.c         #   character device + ioctl dispatch
-│   ├── walk.c                    #   architecture-neutral page-table walk
-│   ├── read.c                    #   bulk read (command 2) + System-RAM gate
-│   ├── arch.h                    #   per-arch layer (root register, level fold)
-│   └── pagewalker.h              #   internal cross-file interface
+│   ├── pagewalker_device.c       #   character device + ioctl dispatch (module entry)
+│   ├── walk.c, walk.h            #   page-table walk + bulk read (command 2)
+│   └── arch.h                    #   per-arch inline layer (root register, level fold)
 ├── user/                         # CLI -> pagewalkerctl
 │   ├── pagewalkerctl.c           #   argument handling + dispatch
 │   ├── pagewalkerctl.h           #   CLI umbrella header (includes, out_fmt)
@@ -159,6 +163,14 @@ Build artifacts are produced next to their source (kernel Kbuild convention);
 there is no separate output directory. Each tree carries its own `.clang-format`:
 `kernel/` follows strict Linux kernel style, while `user/` uses a readable variant
 that keeps braces on every control statement.
+
+Source indexes are built on demand and are not part of the default build:
+`make tags` (ctags), `make cscope`, and `make clangd`. The last generates a
+per-tree `compile_commands.json` (kernel and user), so `clangd` resolves symbols
+as an LSP in parallel with ctags/cscope; the committed `.clangd` strips the
+GCC-only kernel build flags that clang's driver rejects. Both databases carry
+absolute, kernel-tree-specific paths and are regenerated after changing `KDIR`,
+so they are git-ignored. `make clangd` needs `python3` and `bear`.
 
 ## Build
 
@@ -415,6 +427,15 @@ A non-existent PID or a non-canonical address is reported and the tool exits.
 - **MMIO in a process walk** — `--allow-mmio` returns real bytes only on the
   kernel path (`-k`). For a process address a non-RAM frame is read through the
   direct map and faults, so the run stops with a fault instead of returning data.
+- **Concurrent target, snapshot semantics** — a process walk is anchored to a
+  live VMA under `mmap_read_lock`, so page tables are not freed under it; but the
+  bulk read copies each frame's bytes *after* the per-page walk (frames are not
+  pinned), so if the target frees and reuses that frame in the same instant the
+  dump can return the new contents. A hugetlb mapping using PMD sharing can also
+  have its shared table torn down by another address space; both are races only a
+  hostile, self-modifying target can force, and the module stays fault-safe
+  (`copy_from_kernel_nofault`) throughout — it is a data-freshness caveat, not a
+  crash. Run against a quiescent target for a byte-exact dump.
 
 ## Kernel Logs
 
