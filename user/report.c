@@ -443,7 +443,16 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
                 break;
             }
         }
-        if (li < level_count) {
+        /*
+         * A huge leaf whose level is folded above the displayed levels (a PUD
+         * leaf on a 3-level tree, or a P4D leaf below 5 levels) sits at the top
+         * displayed level. Without this the trim is skipped and the report shows
+         * spurious empty rows for the never-walked lower levels.
+         */
+        if (li >= level_count) {
+            li = 0;
+        }
+        {
             unsigned long long s = res->page_size;
 
             shown_levels = li + 1;
