@@ -401,11 +401,13 @@ end at the PUD leaf, and the final block reads
 ### Errors
 
 ```bash
-sudo ./user/pagewalkerctl -1 0x1000
+sudo ./user/pagewalkerctl 0 0x1000
 # Error: Invalid PID.
 ```
 
-A non-existent PID or a non-canonical address is reported and the tool exits.
+A malformed, zero, or out-of-range PID, a non-existent PID, or a non-canonical
+address is reported and the tool exits non-zero. A leading-dash argument such as
+`-1` is taken as an option, so it prints the usage instead.
 
 ## Limitations
 
