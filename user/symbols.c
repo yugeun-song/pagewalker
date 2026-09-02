@@ -104,7 +104,8 @@ static int elf_lookup(const char *path, const char *name,
     /* Link base = p_vaddr of the PT_LOAD covering file offset 0. */
     *load_vaddr = 0;
     if (elf_header->e_phoff && elf_header->e_phnum &&
-        elf_header->e_phoff + (size_t)elf_header->e_phnum * sizeof(Elf64_Phdr) <= file_size) {
+        elf_header->e_phoff <= file_size &&
+        (size_t)elf_header->e_phnum * sizeof(Elf64_Phdr) <= file_size - elf_header->e_phoff) {
         const Elf64_Phdr *prog_headers = (const Elf64_Phdr *)(base + elf_header->e_phoff);
 
         for (i = 0; i < elf_header->e_phnum; ++i) {
@@ -116,7 +117,8 @@ static int elf_lookup(const char *path, const char *name,
     }
 
     if (!elf_header->e_shoff || !elf_header->e_shnum ||
-        elf_header->e_shoff + (size_t)elf_header->e_shnum * sizeof(Elf64_Shdr) > file_size) {
+        elf_header->e_shoff > file_size ||
+        (size_t)elf_header->e_shnum * sizeof(Elf64_Shdr) > file_size - elf_header->e_shoff) {
         goto done;
     }
 
@@ -140,8 +142,10 @@ static int elf_lookup(const char *path, const char *name,
                 if (link >= elf_header->e_shnum) {
                     continue;
                 }
-                if (sections[i].sh_offset + sections[i].sh_size > file_size ||
-                    sections[link].sh_offset + sections[link].sh_size > file_size) {
+                if (sections[i].sh_offset > file_size ||
+                    sections[i].sh_size > file_size - sections[i].sh_offset ||
+                    sections[link].sh_offset > file_size ||
+                    sections[link].sh_size > file_size - sections[link].sh_offset) {
                     continue;
                 }
 
@@ -154,6 +158,11 @@ static int elf_lookup(const char *path, const char *name,
                     unsigned nameoff = sym[j].st_name;
 
                     if (nameoff >= str_size || sym[j].st_shndx == SHN_UNDEF) {
+                        continue;
+                    }
+                    /* The name must be NUL-terminated inside the string table,
+                     * or strcmp() below would read past its end. */
+                    if (strnlen(str + nameoff, str_size - nameoff) == str_size - nameoff) {
                         continue;
                     }
                     if (strcmp(str + nameoff, name) == 0) {
