@@ -4,8 +4,8 @@ tags
 *.swp
 *.swo
 
-# local clangd/LSP config + generated compile DB (kernel-tree specific, not portable)
-.clangd
+# clangd compile database: generated per kernel tree with `make clangd`, carries
+# absolute machine-specific paths, so it is not committed (the .clangd config is).
 compile_commands.json
 
 kernel/*.o

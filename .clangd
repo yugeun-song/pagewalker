@@ -1,0 +1,52 @@
+# clangd configuration for pagewalker.
+#
+# The compile database is generated per kernel tree (see `make compile_commands.json`).
+# For the kernel module it carries the kernel's own GCC build flags; several are
+# GCC-only codegen/hardening switches that clang's driver rejects outright, which
+# would otherwise surface as spurious "unknown argument" errors with no bearing on
+# the code. They are stripped here. The unused-* family is silenced per project
+# policy (the kernel build already passes -Wunused with the same intent, and arch
+# helpers are deliberately defined for every translation unit). Genuine code
+# diagnostics are left on.
+CompileFlags:
+  Compiler: clang
+  Remove:
+    # x86 retpoline / return-thunk / mcount codegen (GCC-only spellings)
+    - -mpreferred-stack-boundary=*
+    - -mindirect-branch=*
+    - -mindirect-branch-register
+    - -mfunction-return=*
+    - -mrecord-mcount
+    - -mskip-rax-setup
+    - -mno-fp-ret-in-387
+    # GCC-only optimizer / init / diagnostic switches
+    - -fno-allow-store-data-races
+    - -fno-ipa-cp-clone
+    - -fno-partial-inlining
+    - -fzero-init-padding-bits=*
+    - -fdiagnostics-show-context=*
+    - -fconserve-stack
+    - -fno-inline-functions-called-once
+    # arm64 / riscv GCC-only codegen switches (present when the DB is regenerated
+    # for a cross build); harmless to list when absent
+    - -mstack-protector-guard=*
+    - -mstack-protector-guard-reg=*
+    - -mstack-protector-guard-offset=*
+    - -mno-relax
+    - -march=rv64*
+    - -mabi=lp64*
+  Add:
+    - -Wno-unused
+    - -Wno-unknown-warning-option
+    - -Wno-unknown-attributes
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
+  Suppress:
+    - unused-*
+    - -Wunused*
+    # arch.h / report.h carry a deliberate #error guard for unsupported arches.
+    # It never fires in a real build (the arch is always defined via the kernel
+    # config / the compiler's __x86_64__ etc.), but clangd trips it when the header
+    # is opened on its own without that context. Editor-only false positive.
+    - pp_hash_error
