@@ -54,8 +54,9 @@ so each arch supports every leaf level its hardware defines:
   target PID's page tables under `mmap_read_lock`, having first confirmed a live
   VMA covers the address (so a concurrent `munmap` cannot free the tables under
   the walk), snapshots each level with the modern typed accessors (`pgdp_get`,
-  `pmdp_get_lockless`, `ptep_get`), and serialises the PTE step with `pmd_lock`
-  against khugepaged / `MADV_COLLAPSE`.
+  `pmdp_get_lockless`, `ptep_get`), serialises the PTE step with `pmd_lock`
+  against khugepaged / `MADV_COLLAPSE`, and takes a folio reference on the
+  mapped frame under the page-table lock before any byte of it is read.
   It exposes `/dev/pagewalker` (root-only) through two `ioctl` commands:
   command 1 resolves one address and reports the single `u64` at it; command 2
   copies a run of bytes into a user buffer, re-walking each page (frames are
@@ -101,7 +102,9 @@ so each arch supports every leaf level its hardware defines:
 - **Per-entry flag decode** — architecture-specific, because the PTE bit layouts
   are disjoint (only the present/valid bit at bit 0 coincides): x86
   `P RW/RO U/S A D PWT PCD G PS PAT NX`, arm64
-  `V RO/RW U/S AF nG SH Cont DBM PXN UXN AI=n BLK`, riscv `V R W X U G A D`.
+  `V RO/RW U/S AF nG SH Cont DBM PXN UXN AI=n BLK` for a block / page and
+  `V TABLE NSTable APTable=n UXNTable PXNTable` for a table descriptor, riscv
+  `V R W X U G A D NAPOT PBMT=NC/IO`.
 - **Kernel read-back verification** — for every level the module independently
   re-reads the entry straight from its physical slot (`*(base + idx*8)` via
   `phys_to_virt`) and the CLI confirms it matches the value obtained through the
@@ -200,7 +203,8 @@ make -C user selftest
 
 ## Usage
 
-Root is required: `/dev/pagewalker` is created mode `0600`, and reading another
+Root is required: `/dev/pagewalker` is created mode `0600`, the module also
+requires `CAP_SYS_RAWIO` at open and on every `ioctl`, and reading another
 process's — or the kernel's — memory needs root anyway.
 
 ```bash
@@ -430,14 +434,20 @@ address is reported and the tool exits non-zero. A leading-dash argument such as
   kernel path (`-k`). For a process address a non-RAM frame is read through the
   direct map and faults, so the run stops with a fault instead of returning data.
 - **Concurrent target, snapshot semantics** — a process walk is anchored to a
-  live VMA under `mmap_read_lock`, so page tables are not freed under it; but the
-  bulk read copies each frame's bytes *after* the per-page walk (frames are not
-  pinned), so if the target frees and reuses that frame in the same instant the
-  dump can return the new contents. A hugetlb mapping using PMD sharing can also
-  have its shared table torn down by another address space; both are races only a
-  hostile, self-modifying target can force, and the module stays fault-safe
-  (`copy_from_kernel_nofault`) throughout — it is a data-freshness caveat, not a
-  crash. Run against a quiescent target for a byte-exact dump.
+  live VMA under `mmap_read_lock`, so page tables are not freed under it, and
+  each frame is pinned (a folio reference taken under the page-table lock that
+  validated its mapping) from the walk until its bytes are copied, so a frame
+  the target frees and reuses is never returned as stale data; a frame that
+  changes under the walk is refused instead. A kernel-space read (`-k`) names
+  the frame itself, so it is served even when the frame is unowned (free);
+  it must name the kernel half of the address space. Frames of offline or
+  device (DAX) memory are never pinned, so a process mapping of them reads
+  as a bad frame.
+  can change them between two pages of one dump. A hugetlb mapping using PMD
+  sharing can also have its shared table torn down by another address space;
+  the module stays fault-safe (`copy_from_kernel_nofault`) throughout — it is a
+  data-freshness caveat, not a crash. Run against a quiescent target for a
+  byte-exact dump.
 
 ## Kernel Logs
 
