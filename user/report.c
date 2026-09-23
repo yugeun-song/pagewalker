@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 #include "report.h"
 
@@ -16,6 +17,27 @@ static int append_str(char *out, int pos, int cap, const char *s)
     }
     out[pos] = '\0';
     return pos;
+}
+
+static int __attribute__((format(printf, 3, 4))) snappend(char *out, int cap, const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+
+    if (cap <= 0) {
+        return 0;
+    }
+    va_start(ap, fmt);
+    n = vsnprintf(out, (size_t)cap, fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        out[0] = '\0';
+        return 0;
+    }
+    if (n >= cap) {
+        return cap - 1;
+    }
+    return n;
 }
 
 /* One-line description of the root translation register for this arch. */
@@ -129,6 +151,11 @@ static void decode_pte_flags(char *out, int cap, unsigned long long e,
 #define A64_CONT (1ULL << 52)   /* Contiguous range */
 #define A64_PXN (1ULL << 53)    /* Privileged eXecute Never */
 #define A64_UXN (1ULL << 54)    /* User eXecute Never */
+#define A64_TABLE_PXN (1ULL << 59)
+#define A64_TABLE_UXN (1ULL << 60)
+#define A64_TABLE_AP_SHIFT 61
+#define A64_TABLE_AP_MASK (3ULL << 61)
+#define A64_TABLE_NS (1ULL << 63)
 
 static void decode_pte_flags(char *out, int cap, unsigned long long e,
                              int huge_capable, int is_pte)
@@ -137,9 +164,27 @@ static void decode_pte_flags(char *out, int cap, unsigned long long e,
     char ai[16];
     int p = 0;
 
-    (void)is_pte;
     out[0] = '\0';
     p = append_str(out, p, cap, "V");
+    if (!is_pte && (e & A64_TABLE)) {
+        unsigned apt = (unsigned)((e & A64_TABLE_AP_MASK) >> A64_TABLE_AP_SHIFT);
+
+        p = append_str(out, p, cap, " TABLE");
+        if (e & A64_TABLE_NS) {
+            p = append_str(out, p, cap, " NSTable");
+        }
+        if (apt) {
+            snprintf(ai, sizeof(ai), " APTable=%u", apt);
+            p = append_str(out, p, cap, ai);
+        }
+        if (e & A64_TABLE_UXN) {
+            p = append_str(out, p, cap, " UXNTable");
+        }
+        if (e & A64_TABLE_PXN) {
+            p = append_str(out, p, cap, " PXNTable");
+        }
+        return;
+    }
     p = append_str(out, p, cap, (e & A64_RDONLY) ? " RO" : " RW");
     p = append_str(out, p, cap, (e & A64_USER) ? " U" : " S");
     if (e & A64_AF) {
@@ -176,6 +221,9 @@ static void decode_pte_flags(char *out, int cap, unsigned long long e,
 #define RV_G (1ULL << 5)
 #define RV_A (1ULL << 6)
 #define RV_D (1ULL << 7)
+#define RV_PBMT_SHIFT 61
+#define RV_PBMT_MASK (3ULL << 61)
+#define RV_NAPOT (1ULL << 63)
 
 static void decode_pte_flags(char *out, int cap, unsigned long long e,
                              int huge_capable, int is_pte)
@@ -208,6 +256,16 @@ static void decode_pte_flags(char *out, int cap, unsigned long long e,
     /* No R/W/X set means this is a pointer to the next table, not a leaf. */
     if (!(e & (RV_R | RV_W | RV_X))) {
         p = append_str(out, p, cap, " (table)");
+    } else {
+        unsigned pbmt = (unsigned)((e & RV_PBMT_MASK) >> RV_PBMT_SHIFT);
+
+        if (e & RV_NAPOT) {
+            p = append_str(out, p, cap, " NAPOT");
+        }
+        if (pbmt) {
+            p = append_str(out, p, cap, pbmt == 1 ? " PBMT=NC" : pbmt == 2 ? " PBMT=IO"
+                                                                           : " PBMT=?");
+        }
     }
 }
 
@@ -220,24 +278,24 @@ static void print_step(char *buf, int *offset, const char *level_name,
 {
     unsigned long long entry_addr = table_base + (idx * 8);
 
-    *offset += snprintf(buf + *offset, BUFFER_SIZE - *offset,
+    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
                         "[%s]\n", level_name);
-    *offset += snprintf(buf + *offset, BUFFER_SIZE - *offset,
+    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
                         "  Table Base  : 0x%llx\n", table_base);
-    *offset += snprintf(buf + *offset, BUFFER_SIZE - *offset,
+    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
                         "  Index       : 0x%llx (%llu)\n", idx, idx);
-    *offset += snprintf(buf + *offset, BUFFER_SIZE - *offset,
+    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
                         "  Calculation : 0x%llx + (0x%llx * 8) = 0x%llx\n", table_base, idx, entry_addr);
-    *offset += snprintf(buf + *offset, BUFFER_SIZE - *offset,
+    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
                         "  Entry Value : 0x%llx\n", entry_val);
 
     if (table_base) {
         if (readback == entry_val) {
-            *offset += snprintf(buf + *offset, BUFFER_SIZE - *offset,
+            *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
                                 "  Verify      : *(0x%llx) == 0x%llx  [kernel read-back OK]\n",
                                 entry_addr, entry_val);
         } else {
-            *offset += snprintf(buf + *offset, BUFFER_SIZE - *offset,
+            *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
                                 "  Verify      : *(0x%llx) read 0x%llx != entry 0x%llx  [MISMATCH]\n",
                                 entry_addr, readback, entry_val);
         }
@@ -247,11 +305,11 @@ static void print_step(char *buf, int *offset, const char *level_name,
         char flags[96];
 
         decode_pte_flags(flags, sizeof(flags), entry_val, huge_capable, is_pte);
-        *offset += snprintf(buf + *offset, BUFFER_SIZE - *offset,
+        *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
                             "  Flags       : %s\n", flags);
     }
 
-    *offset += snprintf(buf + *offset, BUFFER_SIZE - *offset,
+    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
                         "  Status      : %s\n\n", is_valid_entry ? "Valid (Present)" : "Not Present / Empty");
 }
 
@@ -360,12 +418,12 @@ static int emit_sep(char *buf, int off, int labelw, const int *col_widths, int n
     char dash[64];
     int i;
 
-    off += snprintf(buf + off, BUFFER_SIZE - off, "+%s+", fill(dash, labelw, '-'));
+    off += snappend(buf + off, BUFFER_SIZE - off, "+%s+", fill(dash, labelw, '-'));
     for (i = 0; i < ncols; ++i) {
-        off += snprintf(buf + off, BUFFER_SIZE - off, "%s+", fill(dash, col_widths[i], '-'));
+        off += snappend(buf + off, BUFFER_SIZE - off, "%s+", fill(dash, col_widths[i], '-'));
     }
 
-    off += snprintf(buf + off, BUFFER_SIZE - off, "\n");
+    off += snappend(buf + off, BUFFER_SIZE - off, "\n");
     return off;
 }
 
@@ -376,13 +434,13 @@ static int emit_row(char *buf, int off, const char *label, int labelw,
     char tmp[64];
     int i;
 
-    off += snprintf(buf + off, BUFFER_SIZE - off, "|%s|",
+    off += snappend(buf + off, BUFFER_SIZE - off, "|%s|",
                     center(tmp, sizeof(tmp), labelw, label));
     for (i = 0; i < ncols; ++i) {
-        off += snprintf(buf + off, BUFFER_SIZE - off, "%s|",
+        off += snappend(buf + off, BUFFER_SIZE - off, "%s|",
                         center(tmp, sizeof(tmp), col_widths[i], cells[i]));
     }
-    off += snprintf(buf + off, BUFFER_SIZE - off, "\n");
+    off += snappend(buf + off, BUFFER_SIZE - off, "\n");
     return off;
 }
 
@@ -465,22 +523,22 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
     }
 
     /* --- Report Header --- */
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+    offset += snappend(buf + offset, BUFFER_SIZE - offset,
                        "\n=========================================================\n");
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+    offset += snappend(buf + offset, BUFFER_SIZE - offset,
                        " %s Page Table Walk Report\n", PW_ARCH_NAME);
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+    offset += snappend(buf + offset, BUFFER_SIZE - offset,
                        "=========================================================\n");
     if (kernel_mode) {
-        offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+        offset += snappend(buf + offset, BUFFER_SIZE - offset,
                            " Target       : kernel address space\n");
     } else {
-        offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+        offset += snappend(buf + offset, BUFFER_SIZE - offset,
                            " Target PID   : %u\n", pid);
     }
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+    offset += snappend(buf + offset, BUFFER_SIZE - offset,
                        " Target VAddr : 0x%016llx\n", res->target_vaddr);
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+    offset += snappend(buf + offset, BUFFER_SIZE - offset,
                        " Paging Mode  : %d-Level Paging (VA %d-bit, page %u KiB)\n",
                        res->paging_level, va_bits, (1u << res->page_shift) / 1024);
 
@@ -566,7 +624,7 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
     offset = emit_row(buf, offset, "VAL", labelw, hexcells, col_widths, field_count);
     offset = emit_row(buf, offset, "BIN", labelw, bincells, col_widths, field_count);
     offset = emit_sep(buf, offset, labelw, col_widths, field_count);
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset, "\n");
+    offset += snappend(buf + offset, BUFFER_SIZE - offset, "\n");
 
     /*
      * Full 64-bit address, split on the page-table field boundaries. Each binary
@@ -584,35 +642,35 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
         acc += col_widths[i] + 1;
     }
 
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+    offset += snappend(buf + offset, BUFFER_SIZE - offset,
                        " Target VAddr (64-bit, MSB -> LSB): 0x%016llx\n", res->target_vaddr);
 
     char sp[96];
     int cur = binstart[0] - 3; /* leave room for "-> " just before the first group */
 
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset, "%s-> ", fill(sp, cur, ' '));
+    offset += snappend(buf + offset, BUFFER_SIZE - offset, "%s-> ", fill(sp, cur, ' '));
     cur += 3;
     for (i = 0; i < field_count; ++i) {
         if (binstart[i] > cur) {
-            offset += snprintf(buf + offset, BUFFER_SIZE - offset, "%s",
+            offset += snappend(buf + offset, BUFFER_SIZE - offset, "%s",
                                fill(sp, binstart[i] - cur, ' '));
             cur = binstart[i];
         }
-        offset += snprintf(buf + offset, BUFFER_SIZE - offset, "%s", raws[i]);
+        offset += snappend(buf + offset, BUFFER_SIZE - offset, "%s", raws[i]);
         cur += (int)strlen(raws[i]);
     }
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset, "\n\n");
+    offset += snappend(buf + offset, BUFFER_SIZE - offset, "\n\n");
 
     /* --- Detailed Steps --- */
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset, "=== Translation Steps ===\n\n");
+    offset += snappend(buf + offset, BUFFER_SIZE - offset, "=== Translation Steps ===\n\n");
 
     /* Step 0: the arch root translation register. */
     describe_root_reg(rdesc, sizeof(rdesc), res, kernel_mode);
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+    offset += snappend(buf + offset, BUFFER_SIZE - offset,
                        "[Step 0: %s Register]\n", root_reg_name(kernel_mode));
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+    offset += snappend(buf + offset, BUFFER_SIZE - offset,
                        "  Physical Addr : 0x%llx\n", res->root_table_phys);
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+    offset += snappend(buf + offset, BUFFER_SIZE - offset,
                        "  Description   : %s\n\n", rdesc);
 
     /* Steps 1..N: one per walked level (down to the leaf for a huge page). */
@@ -628,36 +686,36 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
     }
 
     /* --- Final Verification --- */
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+    offset += snappend(buf + offset, BUFFER_SIZE - offset,
                        "--------------------------------------------------------\n");
 
     if (res->is_valid) {
         char szs[32];
 
         human_size(szs, sizeof(szs), res->page_size);
-        offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+        offset += snappend(buf + offset, BUFFER_SIZE - offset,
                            "[FINAL RESULT]\n");
-        offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+        offset += snappend(buf + offset, BUFFER_SIZE - offset,
                            "  Mapped Page    : %s  (leaf at %s%s%s)\n", szs,
                            leaf_level_name(res->mapping_level),
                            res->is_contiguous ? ", " : "",
                            res->is_contiguous ? PW_CONT_TERM : "");
-        offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+        offset += snappend(buf + offset, BUFFER_SIZE - offset,
                            "  Page Base Phys : 0x%llx\n", res->page_base_phys);
-        offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+        offset += snappend(buf + offset, BUFFER_SIZE - offset,
                            "  Offset         : 0x%llx\n", res->page_offset);
-        offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+        offset += snappend(buf + offset, BUFFER_SIZE - offset,
                            "  Final Phys Addr: 0x%llx\n\n", res->final_phys_addr);
-        offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+        offset += snappend(buf + offset, BUFFER_SIZE - offset,
                            "[VERIFICATION]\n");
-        offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+        offset += snappend(buf + offset, BUFFER_SIZE - offset,
                            "  Content at Phys: 0x%016llx  (u64, little-endian; bytes appear reversed in a dump)\n",
                            res->value_at_phys);
     } else {
-        offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+        offset += snappend(buf + offset, BUFFER_SIZE - offset,
                            "[FINAL RESULT]\n  Translation Stopped (Page Fault / Not Mapped / Swapped Out)\n");
     }
-    offset += snprintf(buf + offset, BUFFER_SIZE - offset,
+    offset += snappend(buf + offset, BUFFER_SIZE - offset,
                        "--------------------------------------------------------\n");
 
     return offset;
