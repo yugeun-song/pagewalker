@@ -3,6 +3,8 @@
 
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/memory_hotplug.h>
+#include <linux/hugetlb_inline.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
 #include <linux/uaccess.h>
@@ -58,28 +60,71 @@ static void set_leaf(struct pagewalker_result *res, unsigned long vaddr,
 	res->is_valid = 1;
 }
 
+static struct folio *pw_pin_frame(u64 phys)
+{
+	struct page *page = pfn_to_online_page(PHYS_PFN(phys));
+	struct folio *folio;
+
+	if (!page)
+		return NULL;
+	for (;;) {
+		folio = page_folio(page);
+		if (!folio_try_get(folio))
+			return NULL;
+		if (page_folio(page) == folio)
+			return folio;
+		folio_put(folio);
+	}
+}
+
+static void pw_unpin(struct folio **pin)
+{
+	if (*pin) {
+		folio_put(*pin);
+		*pin = NULL;
+	}
+}
+
+static bool pw_pinned_range(struct folio *pin, u64 phys, size_t len)
+{
+	u64 base;
+
+	if (!pin)
+		return false;
+	base = PFN_PHYS(folio_pfn(pin));
+	return phys >= base && phys - base + len <= folio_size(pin);
+}
+
 /*
  * Safe Physical Memory Reader
  * Validates memory presence and performs fault-tolerant reading.
  */
-static void read_physical_content(struct pagewalker_result *res)
+static void read_physical_content(struct pagewalker_result *res, struct folio *pin,
+				  bool need_pin)
 {
 	void *kaddr;
 	unsigned long val = 0;
+	bool ok;
 
 	/*
-	 * pfn_valid() only confirms a struct page / memmap entry exists for the
-	 * frame. It does NOT prove the frame is usable RAM (it may be a reserved
-	 * region or a hole inside an otherwise-present section). The actual
-	 * fault-safety comes from copy_from_kernel_nofault() below, which catches
-	 * a bad access instead of panicking. We validate the EXACT pfn we read
-	 * (final_phys_addr), which for a huge page differs from the page base, and
-	 * additionally gate on page_is_ram() so this single-u64 verification read is
-	 * never turned into an MMIO/device-register access (the same hazard the bulk
-	 * read refuses by default).
+	 * pin is the folio reference the walk took on this frame while its
+	 * mapping was still validated, so the frame cannot be freed and reused
+	 * under the read; the u64 must lie inside that folio. A process walk
+	 * (need_pin) reads nothing it could not pin; a kernel walk may read an
+	 * unpinnable frame (free page, refcount zero) since the kernel address
+	 * space names the frame itself. A memmap entry does NOT prove the frame
+	 * is usable RAM (it may be a reserved region or a hole inside an
+	 * otherwise-present section). The actual fault-safety comes from
+	 * copy_from_kernel_nofault() below, which catches a bad access instead of
+	 * panicking. We validate the EXACT pfn we read (final_phys_addr), which for
+	 * a huge page differs from the page base, and additionally gate on
+	 * page_is_ram() so this single-u64 verification read is never turned into
+	 * an MMIO/device-register access (the same hazard the bulk read refuses by
+	 * default).
 	 */
-	if (!pfn_valid(PHYS_PFN(res->final_phys_addr)) ||
-	    !page_is_ram(PHYS_PFN(res->final_phys_addr))) {
+	ok = pin ? pw_pinned_range(pin, res->final_phys_addr, sizeof(val))
+		 : (!need_pin && pfn_valid(PHYS_PFN(res->final_phys_addr)));
+	if (!ok || !page_is_ram(PHYS_PFN(res->final_phys_addr))) {
 		res->value_at_phys = 0xffffffffffffffff;
 		return;
 	}
@@ -127,17 +172,20 @@ void pw_set_geometry(struct pagewalker_result *res)
  * Architecture-neutral core of the walk, rooted at an explicit pgd table rather
  * than at an mm. `pgd_root` is mm->pgd for a process walk and the kernel root
  * (arch_kernel_pgd()) for a kernel walk. `mm` is non-NULL only for a process
- * walk: it is used solely to take the PTE-level page-table lock that blocks a
- * khugepaged collapse. Kernel page tables (text / linear map / vmalloc) are not
- * collapsed under us, so the kernel walk passes mm == NULL and skips that lock.
+ * walk: it is used to take the page-table locks under which the leaf is
+ * validated and its frame pinned (the PTE-level lock also blocks a khugepaged
+ * collapse). Kernel page tables (text / linear map / vmalloc) are not
+ * collapsed under us, so the kernel walk passes mm == NULL and skips the locks.
  * Returns a short human reason for the log; res->is_valid distinguishes mapped
- * from not-mapped. The caller must set res->target_vaddr and the geometry, and
- * (for a process walk) hold mmap_read_lock(mm) across the call.
+ * from not-mapped. *pin receives a folio reference on the mapped frame (NULL if
+ * none could be taken); the caller drops it with pw_unpin() after its read.
+ * The caller must set res->target_vaddr and the geometry, and (for a process
+ * walk) hold mmap_read_lock(mm) across the call.
  */
 const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
-			   struct pagewalker_result *res)
+			   struct pagewalker_result *res, struct folio **pin)
 {
-	unsigned long vaddr = res->target_vaddr;
+	unsigned long vaddr = arch_untag_addr(res->target_vaddr);
 	pgd_t *pgd;
 	p4d_t *p4d;
 	pud_t *pud;
@@ -148,6 +196,9 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 	pud_t pude;
 	pmd_t pmde;
 	pte_t pte_entry;
+	bool hugetlb = false;
+
+	*pin = NULL;
 
 	/*
 	 * Anchor a process walk to a live VMA. munmap()/mremap()/brk-shrink detach
@@ -167,6 +218,7 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 
 		if (!vma || vaddr < vma->vm_start)
 			return "no VMA covers this address";
+		hugetlb = is_vm_hugetlb_page(vma);
 	}
 
 	/*
@@ -204,12 +256,23 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 		return "P4D entry empty";
 
 	if (p4d_leaf(p4de)) {
+		p4d_t cur;
+
 		/* See the pud_leaf() note: gate residency via pte_present() mirror. */
 		if (!entry_present(p4d_val(p4de)))
 			return "P4D huge entry not present (swap/migration)";
 		set_leaf(res, vaddr, arch_entry_to_table_phys(p4d_val(p4de)),
 			 p4d_leaf_size(p4de), PW_LEAF_P4D, false);
-		read_physical_content(res);
+		if (mm)
+			spin_lock(&mm->page_table_lock);
+		*pin = pw_pin_frame(res->final_phys_addr);
+		cur = p4dp_get(p4d);
+		if (!p4d_leaf(cur) || !entry_present(p4d_val(cur)) ||
+		    arch_entry_to_table_phys(p4d_val(cur)) != arch_entry_to_table_phys(p4d_val(p4de)))
+			pw_unpin(pin);
+		if (mm)
+			spin_unlock(&mm->page_table_lock);
+		read_physical_content(res, *pin, mm != NULL);
 		return "mapped via P4D-level huge page";
 	}
 
@@ -219,7 +282,10 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 	res->pud_idx = pud_index(vaddr);
 	pud = pw_pud_offset(p4d, vaddr);
 	pude = pudp_get(pud);
-	res->pud_base_phys = arch_entry_to_table_phys(p4d_val(p4de));
+	if (res->paging_level >= PAGING_LEVEL_4)
+		res->pud_base_phys = arch_entry_to_table_phys(p4d_val(p4de));
+	else
+		res->pud_base_phys = res->p4d_base_phys;
 	res->pud_val = pud_val(pude);
 	res->pud_readback = read_entry_phys(res->pud_base_phys + res->pud_idx * ENTRY_SIZE);
 
@@ -227,6 +293,9 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 		return "PUD entry empty";
 
 	if (pud_leaf(pude)) {
+		spinlock_t *ptl = NULL;
+		pud_t cur;
+
 		/*
 		 * pud_leaf() reports a 1G mapping but says nothing about residency.
 		 * Gate on entry_present() (a pte_present() mirror) so a swapped or
@@ -238,7 +307,15 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 		set_leaf(res, vaddr, PFN_PHYS(pud_pfn(pude)),
 			 pud_leaf_size(pude), PW_LEAF_PUD,
 			 pud_leaf_size(pude) != PUD_SIZE);
-		read_physical_content(res);
+		if (mm)
+			ptl = pud_lock(mm, pud);
+		*pin = pw_pin_frame(res->final_phys_addr);
+		cur = pudp_get(pud);
+		if (!pud_leaf(cur) || !entry_present(pud_val(cur)) || pud_pfn(cur) != pud_pfn(pude))
+			pw_unpin(pin);
+		if (ptl)
+			spin_unlock(ptl);
+		read_physical_content(res, *pin, mm != NULL);
 		return "mapped via PUD-level huge page";
 	}
 
@@ -256,13 +333,29 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 		return "PMD entry empty";
 
 	if (pmd_leaf(pmde)) {
+		spinlock_t *ptl = NULL;
+		pmd_t cur;
+
 		/* See the pud_leaf() note: present|protnone, mirroring pte_present(). */
 		if (!entry_present(pmd_val(pmde)))
 			return "PMD huge entry not present (swap/migration)";
 		set_leaf(res, vaddr, PFN_PHYS(pmd_pfn(pmde)),
 			 pmd_leaf_size(pmde), PW_LEAF_PMD,
 			 pmd_leaf_size(pmde) != PMD_SIZE);
-		read_physical_content(res);
+		/*
+		 * A hugetlb PMD table may be shared and torn down by another mm
+		 * outside our mmap lock, so its ptl is not safe to take: pin and
+		 * re-read without it, as the kernel walk does.
+		 */
+		if (mm && !hugetlb)
+			ptl = pmd_lock(mm, pmd);
+		*pin = pw_pin_frame(res->final_phys_addr);
+		cur = pmdp_get(pmd);
+		if (!pmd_leaf(cur) || !entry_present(pmd_val(cur)) || pmd_pfn(cur) != pmd_pfn(pmde))
+			pw_unpin(pin);
+		if (ptl)
+			spin_unlock(ptl);
+		read_physical_content(res, *pin, mm != NULL);
 		return "mapped via PMD-level huge page";
 	}
 
@@ -273,6 +366,7 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 	res->pte_base_phys = arch_entry_to_table_phys(pmd_val(pmde));
 
 	if (mm) {
+		spinlock_t *pml;
 		spinlock_t *ptl;
 
 		/*
@@ -283,26 +377,43 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 		 * inline). That is a different lock from pte_offset_map_lock's
 		 * PTE-page ptl, but collapse clears the pmd via pmdp_collapse_flush()
 		 * while holding exactly this lock, so holding it and re-validating
-		 * the pmd blocks the clear that would detach the PTE page. We
-		 * snapshot the entry, then drop the lock. 64-bit arches have no
-		 * highmem, so pte_offset_kernel() needs no kmap.
+		 * the pmd blocks the clear that would detach the PTE page. The PTE
+		 * page's own ptl is then nested inside it, as retract_page_tables()
+		 * does, so the snapshot and the frame pin are taken under the lock
+		 * that serialises a zap of this PTE. 64-bit arches have no highmem,
+		 * so pte_offset_kernel() needs no kmap.
 		 */
-		ptl = pmd_lock(mm, pmd);
+		pml = pmd_lock(mm, pmd);
 		pmde = pmdp_get(pmd);
 		if (pmd_none(pmde) || pmd_leaf(pmde) || pmd_bad(pmde)) {
-			spin_unlock(ptl);
+			spin_unlock(pml);
 			return "PMD changed during walk (collapse race)";
 		}
+		ptl = pte_lockptr(mm, pmd);
+		if (ptl != pml)
+			spin_lock_nested(ptl, SINGLE_DEPTH_NESTING);
 		pte = pte_offset_kernel(pmd, vaddr);
 		pte_entry = ptep_get(pte);
 		/* Read back the PTE slot while the lock still pins the table. */
 		res->pte_readback = read_entry_phys(res->pte_base_phys + res->pte_idx * ENTRY_SIZE);
-		spin_unlock(ptl);
+		if (pte_present(pte_entry))
+			*pin = pw_pin_frame(PFN_PHYS(pte_pfn(pte_entry)));
+		if (ptl != pml)
+			spin_unlock(ptl);
+		spin_unlock(pml);
 	} else {
 		/* Kernel walk: no collapse race, so read the leaf table directly. */
 		pte = pte_offset_kernel(pmd, vaddr);
 		pte_entry = ptep_get(pte);
 		res->pte_readback = read_entry_phys(res->pte_base_phys + res->pte_idx * ENTRY_SIZE);
+		if (pte_present(pte_entry)) {
+			pte_t cur;
+
+			*pin = pw_pin_frame(PFN_PHYS(pte_pfn(pte_entry)));
+			cur = ptep_get(pte);
+			if (!pte_present(cur) || pte_pfn(cur) != pte_pfn(pte_entry))
+				pw_unpin(pin);
+		}
 	}
 
 	res->pte_val = pte_val(pte_entry);
@@ -327,7 +438,7 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 
 		set_leaf(res, vaddr, PFN_PHYS(pte_pfn(pte_entry)), sz,
 			 PW_LEAF_PTE, sz != PAGE_SIZE);
-		read_physical_content(res);
+		read_physical_content(res, *pin, mm != NULL);
 		return (sz != PAGE_SIZE) ? "mapped via PTE contiguous page"
 					 : "mapped via PTE 4K page";
 	}
@@ -339,10 +450,11 @@ int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	struct mm_struct *mm;
 	struct pid *pid_struct;
 	unsigned long vaddr = res->target_vaddr;
+	struct folio *pin;
 	const char *reason;
 
 	/* Validate the request before acquiring any process resources. */
-	if (pid < 0 || pid >= PID_MAX_LIMIT) {
+	if (pid <= 0 || pid >= PID_MAX_LIMIT) {
 		pr_info_ratelimited("pid %d: rejected (pid out of range)\n", pid);
 		return -EINVAL;
 	}
@@ -376,7 +488,7 @@ int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 	}
 
 	mmap_read_lock(mm);
-	reason = pw_walk_levels(mm, mm->pgd, res);
+	reason = pw_walk_levels(mm, mm->pgd, res, &pin);
 
 	if (res->is_valid)
 		pr_info_ratelimited("pid %d vaddr 0x%lx -> phys 0x%llx [%s]\n",
@@ -386,6 +498,7 @@ int perform_page_walk(pid_t pid, struct pagewalker_result *res)
 				    pid, vaddr, reason);
 
 	mmap_read_unlock(mm);
+	pw_unpin(&pin);
 	mmput(mm);
 	return 0;
 }
@@ -400,6 +513,7 @@ int perform_kernel_walk(struct pagewalker_result *res)
 {
 	unsigned long vaddr = res->target_vaddr;
 	pgd_t *root = arch_kernel_pgd();
+	struct folio *pin;
 	const char *reason;
 
 	pw_set_geometry(res);
@@ -409,7 +523,13 @@ int perform_kernel_walk(struct pagewalker_result *res)
 				    vaddr);
 		return 0;
 	}
-	reason = pw_walk_levels(NULL, root, res);
+	if ((long)arch_untag_addr(vaddr) >= 0) {
+		res->is_valid = 0;
+		pr_info_ratelimited("kernel vaddr 0x%lx: rejected (not a kernel address)\n", vaddr);
+		return -EADDRNOTAVAIL;
+	}
+	reason = pw_walk_levels(NULL, root, res, &pin);
+	pw_unpin(&pin);
 
 	if (res->is_valid)
 		pr_info_ratelimited("kernel vaddr 0x%lx -> phys 0x%llx [%s]\n",
@@ -499,8 +619,8 @@ int perform_read(struct pagewalker_read_request *rr)
 	 * Reject a non-representable start address for a process read, matching the
 	 * single-address command (which returns -EADDRNOTAVAIL); reported here via
 	 * PW_STOP_NONCANON so a caller sees the reason instead of a masked alias. A
-	 * kernel read targets the high half, which is not user-canonical, so it is
-	 * not checked - an out-of-range kernel address simply walks to "not mapped".
+	 * kernel read must name the high half: a user-half address would resolve
+	 * through the caller's own tables (x86/riscv) or a bogus TTBR1 index (arm64).
 	 */
 	if (!kernel) {
 		pw_set_geometry(&rr->info);
@@ -508,6 +628,9 @@ int perform_read(struct pagewalker_read_request *rr)
 			rr->stopped = PW_STOP_NONCANON;
 			goto out;
 		}
+	} else if ((long)arch_untag_addr(vaddr) >= 0) {
+		rr->stopped = PW_STOP_NOTKERNEL;
+		goto out;
 	}
 
 	/* Full walk of the START address, for the report the CLI still prints. */
@@ -519,9 +642,12 @@ int perform_read(struct pagewalker_read_request *rr)
 		}
 		perform_kernel_walk(&rr->info);
 	} else {
+		struct folio *pin;
+
 		mmap_read_lock(mm);
-		pw_walk_levels(mm, mm->pgd, &rr->info);
+		pw_walk_levels(mm, mm->pgd, &rr->info, &pin);
 		mmap_read_unlock(mm);
+		pw_unpin(&pin);
 	}
 
 	if (size == 0)
@@ -538,52 +664,58 @@ int perform_read(struct pagewalker_read_request *rr)
 		unsigned long pgoff = cur & (PAGE_SIZE - 1);
 		size_t chunk = min_t(u64, size - done, PAGE_SIZE - pgoff);
 		struct pagewalker_result step;
+		struct folio *pin;
+		bool fault;
 
 		/* Resolve this page's frame first, so the RAM gate can vet it. */
 		memset(&step, 0, sizeof(step));
 		step.target_vaddr = cur;
 		pw_set_geometry(&step);
 		if (kernel) {
-			pw_walk_levels(NULL, kpgd, &step);
+			pw_walk_levels(NULL, kpgd, &step, &pin);
 		} else {
 			mmap_read_lock(mm);
-			pw_walk_levels(mm, mm->pgd, &step);
+			pw_walk_levels(mm, mm->pgd, &step, &pin);
 			mmap_read_unlock(mm);
 		}
 
 		if (!step.is_valid) {
+			pw_unpin(&pin);
 			rr->stopped = PW_STOP_UNMAPPED;
 			break;
 		}
 		if (!allow_mmio && !phys_is_ram(step.final_phys_addr)) {
+			pw_unpin(&pin);
 			rr->stopped = PW_STOP_MMIO;
 			break;
 		}
 
-		if (kernel) {
+		if (kernel && !phys_is_ram(step.final_phys_addr)) {
 			/*
-			 * Read at the kernel VA: correct for the linear map, vmalloc,
-			 * modules and vmemmap alike. The frame was vetted as RAM (or
-			 * MMIO was explicitly allowed); a fault is still caught here.
+			 * Non-RAM frame, explicitly allowed: there is no page to pin,
+			 * so read at the kernel VA (ioremap / fixmap); a fault is
+			 * still caught here.
 			 */
-			if (copy_from_kernel_nofault(bounce, (void *)cur, chunk)) {
-				rr->stopped = PW_STOP_FAULT;
-				break;
-			}
+			fault = copy_from_kernel_nofault(bounce, (void *)cur, chunk) != 0;
 		} else {
 			/*
 			 * The frame is in the linear map (no highmem on 64-bit), so
 			 * read the bytes through phys_to_virt of the resolved address.
-			 * pfn_valid + copy_from_kernel_nofault keep a reserved region
+			 * A process frame is read only while the walk's pin holds it;
+			 * a kernel frame the walk could not pin (free page) is still
+			 * read, and copy_from_kernel_nofault keeps a reserved region
 			 * or a hole from faulting.
 			 */
-			if (!pfn_valid(PHYS_PFN(step.final_phys_addr)) ||
-			    copy_from_kernel_nofault(bounce,
-						     phys_to_virt(step.final_phys_addr),
-						     chunk)) {
-				rr->stopped = PW_STOP_FAULT;
-				break;
-			}
+			fault = !(pin ? pw_pinned_range(pin, step.final_phys_addr, chunk)
+				      : (kernel && pfn_valid(PHYS_PFN(step.final_phys_addr)))) ||
+				copy_from_kernel_nofault(bounce,
+							 phys_to_virt(step.final_phys_addr),
+							 chunk) != 0;
+		}
+		pw_unpin(&pin);
+		if (fault) {
+			rr->stopped = PW_STOP_FAULT;
+			break;
 		}
 
 		if (copy_to_user(dst + done, bounce, chunk)) {

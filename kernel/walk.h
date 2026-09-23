@@ -16,7 +16,7 @@
  */
 void pw_set_geometry(struct pagewalker_result *res);
 const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
-			   struct pagewalker_result *res);
+			   struct pagewalker_result *res, struct folio **pin);
 int perform_page_walk(pid_t pid, struct pagewalker_result *res);
 int perform_kernel_walk(struct pagewalker_result *res);
 

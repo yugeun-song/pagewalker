@@ -16,12 +16,13 @@
 const char *stop_reason(unsigned int code)
 {
     switch (code) {
-    case PW_STOP_UNMAPPED: return "a page in the range is not mapped";
-    case PW_STOP_FAULT:    return "a read faulted (hole / reserved / bad frame)";
-    case PW_STOP_NONCANON: return "address not representable";
-    case PW_STOP_TOOBIG:   return "size exceeded the per-call maximum";
-    case PW_STOP_MMIO:     return "a page is not System RAM (MMIO/reserved); pass --allow-mmio";
-    default:               return "unknown";
+    case PW_STOP_UNMAPPED:  return "a page in the range is not mapped";
+    case PW_STOP_FAULT:     return "a read faulted (hole / reserved / bad frame)";
+    case PW_STOP_NONCANON:  return "address not representable";
+    case PW_STOP_TOOBIG:    return "size exceeded the per-call maximum";
+    case PW_STOP_MMIO:      return "a page is not System RAM (MMIO/reserved); pass --allow-mmio";
+    case PW_STOP_NOTKERNEL: return "not a kernel address";
+    default:                return "unknown";
     }
 }
 

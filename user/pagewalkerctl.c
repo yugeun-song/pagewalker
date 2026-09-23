@@ -273,6 +273,10 @@ int main(int argc, char *argv[])
             fprintf(stderr, "Error: %s not found (is the module loaded?).\n",
                     PAGEWALKER_PATH);
             break;
+        case EPERM:
+            fprintf(stderr, "Error: cannot open %s: Operation not permitted (CAP_SYS_RAWIO is required).\n",
+                    PAGEWALKER_PATH);
+            break;
         default:
             perror("Error opening device");
             break;
@@ -349,6 +353,12 @@ int main(int argc, char *argv[])
                 perror("ioctl");
                 break;
             }
+            free(data);
+            goto cleanup;
+        }
+        if (stopped == PW_STOP_NONCANON || stopped == PW_STOP_NOTKERNEL) {
+            fprintf(stderr, "Error: 0x%llx is not a %s address.\n", start,
+                    stopped == PW_STOP_NOTKERNEL ? "kernel" : "canonical");
             free(data);
             goto cleanup;
         }

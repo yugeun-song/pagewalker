@@ -22,6 +22,7 @@
  *   - arch_entry_to_table_phys()   entry value -> next table's physical base
  *   - arch_kernel_pgd()            root of the kernel half (hardware register)
  *   - arch_addr_representable()    which virtual addresses can be translated
+ *   - arch_untag_addr()            strip an ignored top-byte tag before walking
  *   - pw_p4d_offset / pw_pud_offset  module-safe level descent
  * Everything else below the arch layer is shared source. These are static
  * inline so the header can be included by every translation unit that needs a
@@ -196,6 +197,15 @@ static inline bool arch_addr_representable(unsigned long vaddr, unsigned int va_
 	unsigned long upper = vaddr & mask;
 
 	return sign_bit ? (upper == mask) : (upper == 0);
+#endif
+}
+
+static inline unsigned long arch_untag_addr(unsigned long vaddr)
+{
+#if defined(CONFIG_ARM64)
+	return untagged_addr(vaddr);
+#else
+	return vaddr;
 #endif
 }
 

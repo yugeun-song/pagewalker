@@ -131,6 +131,7 @@ struct pagewalker_request {
 #define PW_STOP_NONCANON     3  /* the start address is not representable on this arch */
 #define PW_STOP_TOOBIG       4  /* size exceeded the per-call maximum (clamped) */
 #define PW_STOP_MMIO         5  /* a page is not System RAM; refused (pass allow-mmio) */
+#define PW_STOP_NOTKERNEL    6  /* a kernel read (-k) named a user-half address */
 
 /* Upper bound on one call's size; the CLI loops for larger dumps. */
 #define PW_READ_MAX          (16u << 20)  /* 16 MiB */

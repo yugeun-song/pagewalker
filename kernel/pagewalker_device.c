@@ -8,13 +8,16 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/slab.h>
+#include <linux/capability.h>
 
 #include "walk.h"
 
+static int pagewalker_open(struct inode *inode, struct file *file);
 static long pagewalker_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
 
 static const struct file_operations pagewalker_fops = {
 	.owner = THIS_MODULE,
+	.open = pagewalker_open,
 	.unlocked_ioctl = pagewalker_ioctl,
 };
 
@@ -85,8 +88,16 @@ out:
 	return ret;
 }
 
+static int pagewalker_open(struct inode *inode, struct file *file)
+{
+	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
+}
+
 static long pagewalker_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
+	if (!capable(CAP_SYS_RAWIO))
+		return -EPERM;
+
 	switch (cmd) {
 	case PAGEWALKER_IOC_GET_INFO:
 		return pagewalker_get_info(arg);
