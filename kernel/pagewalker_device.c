@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: 0BSD
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
@@ -133,4 +133,4 @@ module_exit(pagewalker_exit);
 
 MODULE_DESCRIPTION("Page Table Walker with Phys Verification (x86-64/arm64/riscv64)");
 MODULE_AUTHOR("Yugeun Song");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("Dual BSD/GPL");

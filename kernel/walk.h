@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: 0BSD */
 #ifndef PAGEWALKER_KERNEL_WALK_H
 #define PAGEWALKER_KERNEL_WALK_H
 
