@@ -2,7 +2,7 @@
 #   make CC=aarch64-linux-gnu-gcc
 #   make CC=riscv64-linux-gnu-gcc
 CC ?= gcc
-CFLAGS = -Wall -O2
+CFLAGS = -std=c99 -Wall -Wextra -pedantic -Wshadow -O2
 TARGET = pagewalkerctl
 SELFTEST = selftest
 
