@@ -4,7 +4,6 @@
 #include "walk.h"
 
 #include <linux/bits.h>
-#include <linux/hugetlb_inline.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
@@ -18,6 +17,10 @@
 #include <linux/slab.h>
 #include <linux/threads.h>
 #include <linux/uaccess.h>
+#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 4, 0)
+# include <linux/hugetlb_inline.h>
+#endif
 
 #include "arch.h"
 
@@ -32,6 +35,19 @@
  * used instead of pmd_present()/pud_present() only so one expression serves all
  * three arches uniformly.
  */
+/*
+ * Linux 7.4 removed linux/hugetlb_inline.h and renamed is_vm_hugetlb_page() to
+ * vma_is_hugetlb() in linux/mm.h.
+ */
+static bool pw_vma_is_hugetlb(const struct vm_area_struct *vma)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 4, 0)
+	return vma_is_hugetlb(vma);
+#else
+	return is_vm_hugetlb_page(vma);
+#endif
+}
+
 static bool is_entry_present(u64 entry_val)
 {
 	return pte_present(__pte(entry_val)) != 0;
@@ -218,7 +234,7 @@ static const char *pw_walk_levels(struct pagewalker_result *const mut_res,
 		if (vma == NULL || vaddr < vma->vm_start) {
 			return "no VMA covers this address";
 		}
-		is_hugetlb = is_vm_hugetlb_page(vma);
+		is_hugetlb = pw_vma_is_hugetlb(vma);
 	}
 
 	/*

@@ -44,6 +44,14 @@ so each arch supports every leaf level its hardware defines:
   leaves at 4 KiB (PTE), 2 MiB (PMD) and 1 GiB (PUD), the 64 KiB NAPOT contiguous
   encoding, and the 512 GiB P4D terapage on Sv48+.
 
+The module supports Linux 6.18 (LTS) through mainline. It builds against
+6.18.63, 7.3 and 7.4-rc2 on all three architectures, and the self-test passes
+in QEMU on x86-64 (6.18, 7.3, 7.4-rc2) and riscv64 (6.18 and 7.4-rc2, in Sv39,
+Sv48 and Sv57). Linux 7.4 renamed `is_vm_hugetlb_page()` to `vma_is_hugetlb()`
+and turned riscv's `pgtable_l4_enabled` and `pgtable_l5_enabled` into
+functions; `LINUX_VERSION_CODE` checks in `kernel/walk.c` and `kernel/arch.h`
+select the form each kernel has.
+
 ## Components
 
 - **Kernel module** — `kernel/` builds `pagewalker.ko` from `pagewalker_device.c`

@@ -7,6 +7,7 @@
 #include <linux/mm.h>
 #include <linux/pfn.h>
 #include <linux/pgtable.h>
+#include <linux/version.h>
 
 #include "../include/pagewalker_common.h"
 
@@ -141,13 +142,35 @@ static inline pud_t *pw_get_pud_slot(p4d_t *const p4d, unsigned long addr)
 /* RV64 stores a 44-bit PPN in PTE bits [53:10]; the flags live in bits [9:0]. */
 # define PW_RISCV_PFN_MASK GENMASK_ULL(53, 10)
 
+/*
+ * Linux 7.4 turned pgtable_l4_enabled and pgtable_l5_enabled from exported bool
+ * variables into inline functions of the same names. Before 7.4 the bare name
+ * is the flag; from 7.4 on the bare name is a function address, always true.
+ */
+static inline bool pw_riscv_is_l4_enabled(void)
+{
+# if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 4, 0)
+	return pgtable_l4_enabled();
+# else
+	return pgtable_l4_enabled;
+# endif
+}
+
+static inline bool pw_riscv_is_l5_enabled(void)
+{
+# if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 4, 0)
+	return pgtable_l5_enabled();
+# else
+	return pgtable_l5_enabled;
+# endif
+}
+
 static inline int pw_arch_get_paging_level(void)
 {
-	/* pgtable_l4_enabled / pgtable_l5_enabled are bare bool variables here. */
-	if (pgtable_l5_enabled) {
+	if (pw_riscv_is_l5_enabled()) {
 		return PAGING_LEVEL_5;
 	}
-	if (pgtable_l4_enabled) {
+	if (pw_riscv_is_l4_enabled()) {
 		return PAGING_LEVEL_4;
 	}
 	return PAGING_LEVEL_3; /* Sv39 */
@@ -177,11 +200,11 @@ static inline pgd_t *pw_arch_get_kernel_pgd(void)
  * riscv defines pud_offset()/p4d_offset() out-of-line in arch/riscv/mm and does
  * NOT export them, so a module cannot link against them (x86/arm64 fold these
  * inline). Replicate the kernel's exact runtime level-folding here using only
- * inline helpers and the exported pgtable_l4_enabled / pgtable_l5_enabled flags.
+ * inline helpers and the pgtable_l4_enabled / pgtable_l5_enabled state.
  */
 static inline p4d_t *pw_get_p4d_slot(pgd_t *const pgd, unsigned long addr)
 {
-	if (pgtable_l5_enabled) {
+	if (pw_riscv_is_l5_enabled()) {
 		return pgd_pgtable(pgdp_get(pgd)) + p4d_index(addr);
 	}
 	return (p4d_t *)pgd;
@@ -189,7 +212,7 @@ static inline p4d_t *pw_get_p4d_slot(pgd_t *const pgd, unsigned long addr)
 
 static inline pud_t *pw_get_pud_slot(p4d_t *const p4d, unsigned long addr)
 {
-	if (pgtable_l4_enabled) {
+	if (pw_riscv_is_l4_enabled()) {
 		return p4d_pgtable(p4dp_get(p4d)) + pud_index(addr);
 	}
 	return (pud_t *)p4d;
