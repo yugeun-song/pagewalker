@@ -13,9 +13,25 @@ KDIR := $(lastword $(shell ls -d /lib/modules/*/build 2> /dev/null | sort -V))
 endif
 endif
 KALIAS_DIRS ?= /usr/src
-KCC = $(if $(LLVM),$(filter %/,$(LLVM))clang$(filter -%,$(LLVM)),$(CROSS_COMPILE)gcc)
-KMAKE = $(MAKE) -C kernel KDIR='$(KDIR)' CC='$(KCC)'
-KCOMPDB = $(MAKE) -C '$(KDIR)' M='$(CURDIR)/kernel' CC='$(KCC)' PROFILE='$(PROFILE)' \
+ifneq ($(filter all debug release kernel index compdb,$(or $(MAKECMDGOALS),all)),)
+KINFO := $(shell python3 kernel/ktree.py check --baseline 6.0 --arch '$(ARCH)' --cross '$(CROSS_COMPILE)' \
+	--llvm '$(LLVM)' --cc '' '$(KDIR)')
+ifneq ($(.SHELLSTATUS),0)
+$(error $(KINFO))
+endif
+endif
+kinfo = $(patsubst $(1)=%,%,$(filter $(1)=%,$(KINFO)))
+ARCH := $(or $(ARCH),$(call kinfo,arch))
+ifeq ($(CROSS_COMPILE)$(LLVM),)
+CROSS_COMPILE := $(call kinfo,cross)
+LLVM := $(call kinfo,llvm)
+endif
+KCC = $(or $(call kinfo,cc),$(if $(LLVM),$(filter %/,$(LLVM))clang$(filter -%,$(LLVM)),$(CROSS_COMPILE)gcc))
+KTC = $(if $(ARCH),ARCH='$(ARCH)') $(if $(CROSS_COMPILE),CROSS_COMPILE='$(CROSS_COMPILE)') \
+	$(if $(LLVM),LLVM='$(LLVM)') CC='$(KCC)'
+KTARGET = $(KDIR) (ARCH=$(ARCH)$(if $(CROSS_COMPILE), CROSS_COMPILE=$(CROSS_COMPILE))$(if $(LLVM), LLVM=$(LLVM)))
+KMAKE = $(MAKE) -C kernel KDIR='$(KDIR)' $(KTC)
+KCOMPDB = $(MAKE) -C '$(KDIR)' M='$(CURDIR)/kernel' $(KTC) PROFILE='$(PROFILE)' \
 	$(if $(filter debug,$(PROFILE)),W=1) compile_commands.json > /dev/null && \
 	python3 kernel/clang-compdb.py --db kernel/compile_commands.json --kdir '$(KDIR)' --profile '$(PROFILE)' \
 	--headers --link-dirs '$(KALIAS_DIRS)'
@@ -32,7 +48,8 @@ EXTRA_HELP_GOALS := '  kernel        the kernel module with the PROFILE flags (K
 	'  user          the user programs with the PROFILE flags'
 EXTRA_HELP_VARIABLES := '  KDIR=<dir>             kernel build tree of the module (default: the running kernel,' \
 	'                         else the newest under /lib/modules)' \
-	'  LLVM=, CROSS_COMPILE=  toolchain of the module, as in Kbuild (default: gcc)'
+	'  ARCH=<arch>            target of the module (default: the architecture KDIR was built for)' \
+	'  CROSS_COMPILE=, LLVM=  toolchain of the module (default: the one KDIR was built with)'
 
 include build.mk
 
@@ -47,12 +64,12 @@ user: $(foreach p,$(PROGRAMS),$(call mk_bin,$(PROFILE),$(p)))
 
 kmod-debug:
 	$(KMAKE) PROFILE=debug
-	@echo "=> debug module: kernel/pagewalker.ko for $(KDIR)"
+	@echo "=> debug module: kernel/pagewalker.ko for $(KTARGET)"
 	@$(if $(filter debug,$(PROFILE)),$(KREFRESH),:)
 
 kmod-release:
 	$(KMAKE) PROFILE=release
-	@echo "=> release module: kernel/pagewalker.ko and its debug info kernel/pagewalker.ko.debug for $(KDIR)"
+	@echo "=> release module: kernel/pagewalker.ko and its debug info kernel/pagewalker.ko.debug for $(KTARGET)"
 	@$(if $(filter release,$(PROFILE)),$(KREFRESH),:)
 
 kmod-compdb: kmod-$(PROFILE)

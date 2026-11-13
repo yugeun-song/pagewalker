@@ -205,19 +205,24 @@ make help       # the goals, the variables and the programs
 
 Debug builds of the CLI keep `-O0`, full debug information, `-pg`, no injected
 hardening, no PIE and `-rdynamic`; the sanitize build adds `-fsanitize=address`
-(or `SANITIZE=<list>`) and leaves out the static self-test. The module's debug
-profile adds `-DDEBUG -g3`, `-fstack-protector-all`, pattern-initialized stack
-variables and `W=1`. When the running kernel has no build tree, the newest one
-under `/lib/modules` is used; `KDIR=` picks another.
+(or `SANITIZE=<list>`) and leaves out the static self-test. The module's
+profiles come from `kernel/profile.mk`, the same file as linux-kernel-samples'
+`scripts/profile.mk`: release keeps the kernel's flags and splits the debug
+information into `pagewalker.ko.debug`; debug adds `-DDEBUG -g3`, no inlining,
+sibling calls or builtins, frame pointers, `-fstack-protector-all`,
+pattern-initialized stack variables, the per-module sanitizer switches and `W=1`.
+When the running kernel has no build tree, the newest one under `/lib/modules` is
+used; `KDIR=` picks another.
 
-The module compiles for whatever architecture the running kernel is — no Makefile
-change needed. To cross-build for another arch, point the kernel `Makefile` at a
-matching prebuilt headers tree and override the toolchain:
+The module builds for the architecture `KDIR` was built for. `kernel/ktree.py`,
+the same file as in linux-kernel-samples, reads the tree's architecture and
+toolchain, so a tree built for another architecture needs no other option;
+`ARCH=`, `CROSS_COMPILE=` and `LLVM=` override what it finds:
 
 ```bash
-# kernel module (against a prebuilt arm64 / riscv64 headers tree)
-make -C kernel ARCH=arm64   CROSS_COMPILE=aarch64-linux-gnu- KDIR=/path/to/arm64/headers
-make -C kernel ARCH=riscv   CROSS_COMPILE=riscv64-linux-gnu- KDIR=/path/to/riscv64/headers
+# kernel module against a tree built for arm64 or riscv64
+make kernel KDIR=/path/to/arm64/tree
+make kernel KDIR=/path/to/riscv64/tree PROFILE=release
 
 # user CLI and self-test only
 make user CC=aarch64-linux-gnu-gcc
