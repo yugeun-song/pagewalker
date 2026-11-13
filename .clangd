@@ -1,6 +1,6 @@
 # clangd configuration for pagewalker.
 #
-# The compile database is generated per kernel tree (see `make compile_commands.json`).
+# The compile database is generated per kernel tree (see `make index`).
 # For the kernel module it carries the kernel's own GCC build flags; several are
 # GCC-only codegen/hardening switches that clang's driver rejects outright, which
 # would otherwise surface as spurious "unknown argument" errors with no bearing on

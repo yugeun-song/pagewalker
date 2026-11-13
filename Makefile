@@ -1,26 +1,40 @@
-.PHONY: all clean tags cscope clangd compile_commands.json user kernel
+STD := c99
+PROGRAMS := pagewalkerctl selftest
+pagewalkerctl_SRCS := user/pagewalkerctl.c user/report.c user/dump.c user/symbols.c user/read.c
+selftest_SRCS := user/selftest.c
+selftest_STATIC := 1
 
-# The default build produces only the binaries (module + CLI). Build the source
-# indexes explicitly with `make tags cscope clangd`; `make clean` removes them.
-all: kernel user
+KVER ?= $(shell uname -r)
+ifeq ($(origin KDIR),undefined)
+KDIR := /lib/modules/$(KVER)/build
+ifeq ($(wildcard $(KDIR)/Makefile),)
+KDIR := $(lastword $(shell ls -d /lib/modules/*/build 2> /dev/null | sort -V))
+endif
+endif
+KCC = $(if $(LLVM),$(filter %/,$(LLVM))clang$(filter -%,$(LLVM)),$(CROSS_COMPILE)gcc)
+KMAKE = $(MAKE) -C kernel KDIR='$(KDIR)' CC='$(KCC)'
 
-# Kernel build directory, shared by the module build and the clangd database.
-# Override to build (and index) against another tree, e.g.
-#   make clangd KDIR=/path/to/arm64/headers
-KDIR ?= /lib/modules/$(shell uname -r)/build
+EXTRA_DEBUG := kmod-debug
+EXTRA_RELEASE := kmod-release
+EXTRA_COMPDB := kmod-compdb
+EXTRA_CLEAN := kmod-clean
+EXTRA_CLEAN_INDEX := kmod-clean-index
 
-kernel:
-	$(MAKE) -C kernel KDIR=$(KDIR)
+include mk/c.mk
 
-user:
-	$(MAKE) -C user
+ifndef MK_SEQUENTIAL
 
-tags:
-	ctags -R .
+.PHONY: kernel user kmod-debug kmod-release kmod-compdb kmod-clean kmod-clean-index
 
-cscope:
-	find . -name "*.[ch]" > cscope.files
-	cscope -b -q -i cscope.files
+kernel: kmod-debug
+
+user: $(foreach p,$(PROGRAMS),$(call mk_bin,debug,$(p)))
+
+kmod-debug:
+	$(KMAKE) PROFILE=debug
+
+kmod-release:
+	$(KMAKE) PROFILE=release
 
 # Give clangd an explicit command for the kernel headers as well, cloned from
 # walk.c, so opening arch.h / walk.h on their own still resolves the kernel
@@ -50,20 +64,14 @@ json.dump(db, open(p, "w"), indent=2)
 endef
 export PW_INJECT_HDR_ENTRIES
 
-# clangd compile database, one per tree, so clangd resolves symbols as an LSP
-# alongside ctags/cscope. The kernel DB is read from the module's Kbuild .cmd
-# files (the module is built first); the user DB is captured with bear. Both are
-# specific to this machine and KDIR (absolute paths), so they are git-ignored;
-# regenerate after changing KDIR. Needs python3 and bear.
-clangd: compile_commands.json
-compile_commands.json: kernel
+kmod-compdb: kmod-debug
 	python3 $(KDIR)/scripts/clang-tools/gen_compile_commands.py -d kernel -o kernel/compile_commands.json
 	printf '%s\n' "$$PW_INJECT_HDR_ENTRIES" | python3 -
-	$(MAKE) -C user clean
-	bear --output user/compile_commands.json -- $(MAKE) -C user all selftest
 
-clean:
+kmod-clean:
 	$(MAKE) -C kernel clean
-	$(MAKE) -C user clean
-	rm -f tags cscope.out cscope.in.out cscope.po.out cscope.files
-	rm -f kernel/compile_commands.json user/compile_commands.json
+
+kmod-clean-index:
+	rm -f kernel/compile_commands.json
+
+endif

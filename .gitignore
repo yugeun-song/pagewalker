@@ -4,7 +4,7 @@ tags
 *.swp
 *.swo
 
-# clangd compile database: generated per kernel tree with `make clangd`, carries
+# clangd compile database: generated per kernel tree with `make index`, carries
 # absolute machine-specific paths, so it is not committed (the .clangd config is).
 compile_commands.json
 
@@ -20,10 +20,9 @@ kernel/modules.order
 kernel/Module.symvers
 kernel/*.o.d
 
-user/pagewalkerctl
-user/selftest
-user/*.o
-user/*.d
+/bin/
+/build/
+kernel/*.ko.debug
 
 kernel/compile_flags.txt
 
@@ -31,6 +30,13 @@ cscope.files
 cscope.out
 cscope.in.out
 cscope.po.out
+
+.cache/
+gmon.out
+perf.data
+perf.data.old
+uftrace.data/
+uftrace.data.old/
 
 .DS_Store
 Thumbs.db

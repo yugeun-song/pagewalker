@@ -137,8 +137,8 @@ so each arch supports every leaf level its hardware defines:
 
 ## Self-test
 
-`make -C user selftest` builds a static, granule-agnostic diagnostic. Run as PID
-1 in a QEMU guest it reports the environment and probes the base page, every
+`make selftest` builds a static, granule-agnostic diagnostic. Run as PID 1 in a
+QEMU guest it reports the environment and probes the base page, every
 hugepage size the kernel exposes, a kernel-space `_text` read, and unmapped /
 non-canonical edge cases — adapting to any arch, granule and paging depth.
 
@@ -150,7 +150,8 @@ pagewalker/
 ├── kernel/                       # module -> pagewalker.ko
 │   ├── pagewalker_device.c       #   character device + ioctl dispatch (module entry)
 │   ├── walk.c, walk.h            #   page-table walk + bulk read (command 2)
-│   └── arch.h                    #   per-arch inline layer (root register, level fold)
+│   ├── arch.h                    #   per-arch inline layer (root register, level fold)
+│   └── profile.mk                #   debug / release compiler flags for Kbuild
 ├── user/                         # CLI -> pagewalkerctl
 │   ├── pagewalkerctl.c           #   argument handling + dispatch
 │   ├── pagewalkerctl.h           #   CLI umbrella header (includes, out_fmt)
@@ -159,29 +160,42 @@ pagewalker/
 │   ├── symbols.c                 #   /proc/kallsyms + userspace ELF resolution
 │   ├── read.c                    #   command-2 driver + size / address parsing
 │   └── selftest.c                #   static QEMU self-test (make selftest)
-└── Makefile                      # builds both (kernel Kbuild + gcc)
+├── mk/c.mk                       # CLI build rules shared with the other Make repositories
+└── Makefile                      # builds both: the module through Kbuild, the CLI through mk/c.mk
 ```
 
-Build artifacts are produced next to their source (kernel Kbuild convention);
-there is no separate output directory. Each tree carries its own `.clang-format`:
+The module builds next to its source (Kbuild convention). The CLI and the
+self-test build into `bin/<arch>-linux-<cc>-<mode>/`, with their objects under
+`build/`. Each tree carries its own `.clang-format`:
 `kernel/` follows strict Linux kernel style, while `user/` uses a readable variant
 that keeps braces on every control statement.
 
 Source indexes are built on demand and are not part of the default build:
-`make tags` (ctags), `make cscope`, and `make clangd`. The last generates a
-per-tree `compile_commands.json` (kernel and user), so `clangd` resolves symbols
-as an LSP in parallel with ctags/cscope; the committed `.clangd` strips the
-GCC-only kernel build flags that clang's driver rejects. Both databases carry
-absolute, kernel-tree-specific paths and are regenerated after changing `KDIR`,
-so they are git-ignored. `make clangd` needs `python3` and `bear`.
+`make index` writes `tags` (ctags), `cscope.out` and two `compile_commands.json`,
+one for `kernel/` read from the module's Kbuild `.cmd` files and one at the root
+for `user/` written by `mk/c.mk`, so `clangd` resolves symbols as an LSP in
+parallel with ctags/cscope; `make clean-index` removes them. The committed
+`.clangd` strips the GCC-only kernel build flags that clang's driver rejects.
+Both databases carry absolute, kernel-tree-specific paths and are regenerated
+after changing `KDIR`, so they are git-ignored. The kernel database needs
+`python3`.
 
 ## Build
 
 ```bash
-make                    # builds kernel/pagewalker.ko and user/pagewalkerctl
-make -C user CC=clang   # the CLI alone, with Clang
-make clean
+make            # module (debug profile), CLI and self-test: debug and sanitize builds
+make release    # module (release profile, .ko.debug split), optimized CLI and self-test
+make CC=clang   # CLI with Clang; the module keeps the kernel's own compiler
+make index      # tags, cscope.out, both compile_commands.json (clean-index removes them)
+make clean      # build products (distclean: also the index and tool outputs)
 ```
+
+Debug builds of the CLI keep `-O0`, full debug information, `-pg`, no injected
+hardening, no PIE and `-rdynamic`; the sanitize build adds `-fsanitize=address`
+(or `SANITIZE=<list>`) and leaves out the static self-test. The module's debug
+profile adds `-DDEBUG -g3`, `-fstack-protector-all`, pattern-initialized stack
+variables and `W=1`. When the running kernel has no build tree, the newest one
+under `/lib/modules` is used; `KDIR=` picks another.
 
 The module compiles for whatever architecture the running kernel is — no Makefile
 change needed. To cross-build for another arch, point the kernel `Makefile` at a
@@ -192,14 +206,14 @@ matching prebuilt headers tree and override the toolchain:
 make -C kernel ARCH=arm64   CROSS_COMPILE=aarch64-linux-gnu- KDIR=/path/to/arm64/headers
 make -C kernel ARCH=riscv   CROSS_COMPILE=riscv64-linux-gnu- KDIR=/path/to/riscv64/headers
 
-# user CLI
-make -C user CC=aarch64-linux-gnu-gcc
-make -C user CC=riscv64-linux-gnu-gcc
+# user CLI and self-test only
+make user CC=aarch64-linux-gnu-gcc
+make user CC=riscv64-linux-gnu-gcc
 
 # statically-linked self-test: as PID 1 it loads the module and walks its own
 # 4K / 64K / 2M / 1G mappings, asserting page_size, mapping_level, is_contiguous
 # and the physical content for each (drives the QEMU multi-arch tests above)
-make -C user selftest
+make selftest
 ```
 
 ## Usage
@@ -209,9 +223,10 @@ requires `CAP_SYS_RAWIO` at open and on every `ioctl`, and reading another
 process's — or the kernel's — memory needs root anyway.
 
 ```bash
+PW=./bin/x86_64-linux-gcc-debug/pagewalkerctl         # the directory make names
 sudo insmod kernel/pagewalker.ko                      # creates /dev/pagewalker
-sudo ./user/pagewalkerctl <pid> <address|symbol> [size]   # a process address space
-sudo ./user/pagewalkerctl -k <symbol|0xaddr> [size]       # the kernel address space
+sudo $PW <pid> <address|symbol> [size]                # a process address space
+sudo $PW -k <symbol|0xaddr> [size]                    # the kernel address space
 sudo rmmod pagewalker
 ```
 
@@ -271,8 +286,8 @@ It prints, say, `pid=4242  &local=0x7ffe1c0a8b30`. Read the global by **name**
 and the local by the **address** it printed:
 
 ```bash
-sudo ./user/pagewalkerctl 4242 greeting 32 -c        # global, resolved by symbol
-sudo ./user/pagewalkerctl 4242 0x7ffe1c0a8b30 24 -c  # local, by its %p address
+sudo $PW 4242 greeting 32 -c        # global, resolved by symbol
+sudo $PW 4242 0x7ffe1c0a8b30 24 -c  # local, by its %p address
 ```
 
 Kernel symbol names differ per arch: the top-level table is `init_top_pgt` on
@@ -296,21 +311,21 @@ x86-64 and `swapper_pg_dir` on arm64.
 
 ```bash
 # 64 bytes of the running kernel's text, as a hexdump
-sudo ./user/pagewalkerctl -k _text 64
+sudo $PW -k _text 64
 
 # a global symbol by name in a running process, resolved via its ELF (PIE-safe);
 # environ is a libc global present in every process
-sudo ./user/pagewalkerctl "$(pgrep -n bash)" environ 32 -c
+sudo $PW "$(pgrep -n bash)" environ 32 -c
 
 # a process mapping by address; take a real range from /proc/<pid>/maps first, e.g.
 #   awk 'NR==1{print $1}' /proc/1234/maps   ->  562300abc000-562300ace000
-sudo ./user/pagewalkerctl 1234 0x562300abc000 256 -c
+sudo $PW 1234 0x562300abc000 256 -c
 
 # the first 64 bytes of kernel text, then disassemble them
-sudo ./user/pagewalkerctl -k _text 64 --raw | objdump -D -b binary -m i386:x86-64 -
+sudo $PW -k _text 64 --raw | objdump -D -b binary -m i386:x86-64 -
 
 # the live memblock allocator state (present on arches that keep it post-boot)
-sudo ./user/pagewalkerctl -k memblock 128
+sudo $PW -k memblock 128
 ```
 
 The dump's offset column is relative to the start address; the absolute virtual
@@ -406,7 +421,7 @@ end at the PUD leaf, and the final block reads
 ### Errors
 
 ```bash
-sudo ./user/pagewalkerctl 0 0x1000
+sudo $PW 0 0x1000
 # Error: Invalid PID.
 ```
 
