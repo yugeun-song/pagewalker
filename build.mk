@@ -99,9 +99,9 @@ MK_DEBUG_CFLAGS := -O0 -ggdb3 -fdebug-macro -fno-builtin -fno-inline -fno-omit-f
 	-grecord-gcc-switches -pg -fno-pie
 MK_DEBUG_LDFLAGS := -pg -no-pie -rdynamic -Wl,--build-id
 MK_RELEASE_CFLAGS := -O2 -g -fasynchronous-unwind-tables -fstack-protector-strong \
-	-fstack-clash-protection -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer -Wformat \
-	-Werror=format-security -fcf-protection=full -mbranch-protection=standard -U_FORTIFY_SOURCE \
-	-D_FORTIFY_SOURCE=3 -DNDEBUG -fPIE
+	-fstack-clash-protection -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer \
+	-fcf-protection=full -mbranch-protection=standard -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3 -DNDEBUG \
+	-fPIE
 MK_RELEASE_LDFLAGS := -pie -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,-z,pack-relative-relocs \
 	-Wl,--as-needed -Wl,--build-id
 MK_LTO_gcc := -flto=auto -fno-fat-lto-objects
@@ -148,8 +148,8 @@ MK_SANITIZE_OK := $(shell probe=$$(mktemp) || exit 0; printf 'int main(void) { r
 	$(CC) -fsanitize=$(SANITIZE) -x c - -o "$$probe" > /dev/null 2>&1 && echo yes; rm -f "$$probe")
 endif
 
-MK_COMMON_CFLAGS = -std=$(STD) -Wall -Wextra -pedantic -Wshadow $(WARNINGS_EXTRA) $(CFLAGS_EXTRA) \
-	$(CPPFLAGS_EXTRA)
+MK_COMMON_CFLAGS = -std=$(STD) -Wall -Wextra -pedantic -Wshadow -Wformat -Werror=format-security \
+	$(WARNINGS_EXTRA) $(CFLAGS_EXTRA) $(CPPFLAGS_EXTRA)
 MK_CFLAGS_debug = $(MK_DEBUG_CFLAGS_OK)
 MK_LDFLAGS_debug = $(MK_DEBUG_LDFLAGS_OK)
 MK_CFLAGS_sanitize = $(MK_DEBUG_CFLAGS_OK) -fsanitize=$(SANITIZE) -fno-sanitize-recover=all
