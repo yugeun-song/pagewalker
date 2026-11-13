@@ -160,8 +160,8 @@ pagewalker/
 │   ├── symbols.c                 #   /proc/kallsyms + userspace ELF resolution
 │   ├── read.c                    #   command-2 driver + size / address parsing
 │   └── selftest.c                #   static QEMU self-test (make selftest)
-├── mk/c.mk                       # CLI build rules shared with the other Make repositories
-└── Makefile                      # builds both: the module through Kbuild, the CLI through mk/c.mk
+├── build.mk                      # CLI build rules shared with the other Make repositories
+└── Makefile                      # builds both: the module through Kbuild, the CLI through build.mk
 ```
 
 The module builds next to its source (Kbuild convention). The CLI and the
@@ -173,9 +173,10 @@ that keeps braces on every control statement.
 Source indexes are built on demand and are not part of the default build:
 `make index` writes `tags` (ctags), `cscope.out` and two `compile_commands.json`,
 one for `kernel/` read from the module's Kbuild `.cmd` files and one at the root
-for `user/` written by `mk/c.mk`, so `clangd` resolves symbols as an LSP in
-parallel with ctags/cscope; `make clean-index` removes them. The committed
-`.clangd` strips the GCC-only kernel build flags that clang's driver rejects.
+for `user/` written by `build.mk`, both with the `PROFILE` flags, so `clangd`
+resolves symbols as an LSP in parallel with ctags/cscope; `make clean-index`
+removes them. The kernel database drops the GCC-only kernel build flags that
+clang rejects, probed with `clang` when it is written.
 Both databases carry absolute, kernel-tree-specific paths and are regenerated
 after changing `KDIR`, so they are git-ignored. The kernel database needs
 `python3`.
@@ -185,9 +186,11 @@ after changing `KDIR`, so they are git-ignored. The kernel database needs
 ```bash
 make            # module (debug profile), CLI and self-test: debug and sanitize builds
 make release    # module (release profile, .ko.debug split), optimized CLI and self-test
+make PROFILE=release  # the same as make release; index, kernel and user follow it too
 make CC=clang   # CLI with Clang; the module keeps the kernel's own compiler
 make index      # tags, cscope.out, both compile_commands.json (clean-index removes them)
 make clean      # build products (distclean: also the index and tool outputs)
+make help       # the goals, the variables and the programs
 ```
 
 Debug builds of the CLI keep `-O0`, full debug information, `-pg`, no injected

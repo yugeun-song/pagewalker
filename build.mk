@@ -1,9 +1,10 @@
-MK_DIR := $(patsubst %/,%,$(dir $(lastword $(MAKEFILE_LIST))))
+MK_FILE := $(lastword $(MAKEFILE_LIST))
 MK_PROJECT := $(firstword $(MAKEFILE_LIST))
 
 ifeq ($(origin CC),default)
 CC := gcc
 endif
+PROFILE ?= debug
 SANITIZE ?= address
 STD ?= c99
 BIN_ROOT ?= bin
@@ -13,6 +14,10 @@ CSCOPE ?= cscope
 CLANG_FORMAT ?= clang-format
 CLANG ?= clang
 CPPCHECK ?= cppcheck
+
+ifneq ($(words $(filter debug release,$(PROFILE))) $(words $(PROFILE)),1 1)
+$(error PROFILE takes debug or release, not '$(PROFILE)')
+endif
 
 MAKEFLAGS += --no-builtin-rules
 ifeq ($(filter -j%,$(MAKEFLAGS)),)
@@ -28,6 +33,8 @@ endif
 MK_STANDARD_GOALS := all debug sanitize release index compdb tags cscope clean-index clean distclean \
 	unused format format-check help
 MK_GOALS := $(or $(MAKECMDGOALS),all)
+MK_ALL_debug := debug sanitize
+MK_ALL_release := release
 
 ifneq ($(word 2,$(MAKECMDGOALS)),)
 
@@ -53,6 +60,8 @@ define newline
 
 
 endef
+
+mk_count = $(words $(1)) $(if $(filter 1,$(words $(1))),$(2),$(3))
 
 MK_INDEX_SRCS := $(or $(INDEX_SRCS),$(shell git ls-files -- '*.c' '*.h' 2> /dev/null))
 MK_FORMAT_SRCS := $(or $(FORMAT_SRCS),$(MK_INDEX_SRCS))
@@ -96,44 +105,47 @@ MK_LTO_clang := -flto=thin
 MK_STATIC_DROP_debug := -no-pie -rdynamic
 MK_STATIC_DROP_release := -pie
 
-mk_probe_compile = acc=; for flag in $(2); do if $(CC) -Werror $$acc $$flag -x c -c /dev/null \
+mk_probe_compile = acc=; drop=; for flag in $(3); do if $(CC) -Werror $$acc $$flag -x c -c /dev/null \
 	-o $(@D)/probe.o > /dev/null 2>&1; then acc="$$acc $$flag"; printf '$(1) += %s\n' "$$flag" >> $@.tmp; \
-	else dropped="$$dropped $$flag"; fi; done
+	else drop="$$drop $$flag"; fi; done; echo "=> $(2):$$acc"; [ -z "$$drop" ] || echo "=> $(2) dropped:$$drop"
 
-mk_probe_link = acc=; for flag in $(2); do if printf 'int main(void) { return 0; }\n' | $(CC) -Werror $(3) $$acc \
-	$$flag -x c - -o $(@D)/probe.out -Wl,--fatal-warnings > /dev/null 2>&1; then acc="$$acc $$flag"; \
-	printf '$(1) += %s\n' "$$flag" >> $@.tmp; else dropped="$$dropped $$flag"; fi; done
+mk_probe_link = acc=; drop=; for flag in $(3); do if printf 'int main(void) { return 0; }\n' | $(CC) -Werror $(4) \
+	$$acc $$flag -x c - -o $(@D)/probe.out -Wl,--fatal-warnings > /dev/null 2>&1; then acc="$$acc $$flag"; \
+	printf '$(1) += %s\n' "$$flag" >> $@.tmp; else drop="$$drop $$flag"; fi; done; echo "=> $(2):$$acc"; \
+	[ -z "$$drop" ] || echo "=> $(2) dropped:$$drop"
 
-$(MK_PROBE): $(MK_DIR)/c.mk $(MK_CC_PATH)
+$(MK_PROBE): $(MK_FILE) $(MK_CC_PATH)
 	@mkdir -p $(@D)
 	@if ! $(CC) -Werror -x c -c /dev/null -o $(@D)/probe.o > /dev/null 2>&1; then \
 	    echo "CC=$(CC) cannot compile an empty file with -Werror; pass link-only flags such as -fuse-ld in LDFLAGS"; \
 	    exit 1; \
 	fi
 	@printf 'MK_PROBED_CC := %s\n' '$(CC)' > $@.tmp
-	@dropped=; \
-	$(call mk_probe_compile,MK_DEBUG_CFLAGS_OK,$(MK_DEBUG_CFLAGS)); \
-	$(call mk_probe_link,MK_DEBUG_LDFLAGS_OK,$(MK_DEBUG_LDFLAGS),-fno-pie); \
-	$(call mk_probe_compile,MK_RELEASE_CFLAGS_OK,$(MK_RELEASE_CFLAGS)); \
-	$(call mk_probe_link,MK_RELEASE_LDFLAGS_OK,$(MK_RELEASE_LDFLAGS),-fPIE); \
+	@echo "=> target: $(TAG), $(CC) $$($(CC) -dumpfullversion 2> /dev/null || $(CC) -dumpversion)"; \
+	echo "=> every mode: $(strip $(MK_COMMON_CFLAGS))"; \
+	$(call mk_probe_compile,MK_DEBUG_CFLAGS_OK,debug,$(MK_DEBUG_CFLAGS)); \
+	$(call mk_probe_link,MK_DEBUG_LDFLAGS_OK,debug link,$(MK_DEBUG_LDFLAGS),-fno-pie); \
+	$(call mk_probe_compile,MK_RELEASE_CFLAGS_OK,release,$(MK_RELEASE_CFLAGS)); \
+	$(call mk_probe_link,MK_RELEASE_LDFLAGS_OK,release link,$(MK_RELEASE_LDFLAGS),-fPIE); \
 	if printf 'int main(void) { return 0; }\n' | $(CC) -O2 $(MK_LTO_$(MK_FAMILY)) -x c - \
-        -o $(@D)/probe.out > /dev/null 2>&1; then \
-        printf 'MK_LTO_OK := %s\n' '$(MK_LTO_$(MK_FAMILY))' >> $@.tmp; \
-    else \
-        dropped="$$dropped $(MK_LTO_$(MK_FAMILY))"; \
-    fi; \
-	rm -f $(@D)/probe.o $(@D)/probe.out; \
-	echo "$(TAG): probed $(CC)$${dropped:+; dropped:$$dropped}"
+	    -o $(@D)/probe.out > /dev/null 2>&1; then \
+	    printf 'MK_LTO_OK := %s\n' '$(MK_LTO_$(MK_FAMILY))' >> $@.tmp; \
+	    echo "=> release LTO: $(MK_LTO_$(MK_FAMILY))"; \
+	else \
+	    echo "=> release LTO dropped: $(MK_LTO_$(MK_FAMILY))"; \
+	fi; \
+	rm -f $(@D)/probe.o $(@D)/probe.out
 	@mv $@.tmp $@
 
 include $(MK_PROBE)
 
-ifneq ($(filter all sanitize,$(MK_GOALS)),)
+ifneq ($(filter sanitize,$(patsubst all,$(MK_ALL_$(PROFILE)),$(MK_GOALS))),)
 MK_SANITIZE_OK := $(shell probe=$$(mktemp) || exit 0; printf 'int main(void) { return 0; }\n' | \
 	$(CC) -fsanitize=$(SANITIZE) -x c - -o "$$probe" > /dev/null 2>&1 && echo yes; rm -f "$$probe")
 endif
 
-MK_COMMON_CFLAGS = -std=$(STD) -Wall -Wextra -pedantic -Wshadow $(WARNINGS_EXTRA) $(CPPFLAGS_EXTRA)
+MK_COMMON_CFLAGS = -std=$(STD) -Wall -Wextra -pedantic -Wshadow $(WARNINGS_EXTRA) $(CFLAGS_EXTRA) \
+	$(CPPFLAGS_EXTRA)
 MK_CFLAGS_debug = $(MK_DEBUG_CFLAGS_OK)
 MK_LDFLAGS_debug = $(MK_DEBUG_LDFLAGS_OK)
 MK_CFLAGS_sanitize = $(MK_DEBUG_CFLAGS_OK) -fsanitize=$(SANITIZE) -fno-sanitize-recover=all
@@ -149,10 +161,11 @@ mk_ldflags = $(if $($(2)_STATIC),$(filter-out $(MK_STATIC_DROP_$(1)),$(MK_LDFLAG
 MK_PROGRAMS_debug := $(PROGRAMS)
 MK_PROGRAMS_sanitize := $(foreach p,$(PROGRAMS),$(if $($(p)_STATIC),,$(p)))
 MK_PROGRAMS_release := $(PROGRAMS)
+MK_PROGRAMS_static := $(strip $(foreach p,$(PROGRAMS),$(if $($(p)_STATIC),$(p))))
 MK_MODES := debug sanitize release
 
 define mk_mode_rules
-$(BUILD_ROOT)/$(TAG)-$(1)/%.o: %.c $(MK_PROJECT) $(MK_DIR)/c.mk $(MK_PROBE)
+$(BUILD_ROOT)/$(TAG)-$(1)/%.o: %.c $(MK_PROJECT) $(MK_FILE) $(MK_PROBE)
 	@mkdir -p $$(@D)
 	$$(CC) $$(MK_COMMON_CFLAGS) $$(MK_CFLAGS_$(1)) -MMD -MP $$(CFLAGS) -c $$< -o $$@
 endef
@@ -166,56 +179,63 @@ endef
 
 $(foreach m,$(MK_MODES),$(eval $(call mk_mode_rules,$(m))))
 $(foreach m,$(MK_MODES),$(foreach p,$(MK_PROGRAMS_$(m)),$(eval $(call mk_prog_rules,$(m),$(p)))))
-$(foreach p,$(PROGRAMS),$(eval $(p): $(call mk_bin,debug,$(p))))
+$(foreach p,$(PROGRAMS),$(eval $(p): $(call mk_bin,$(PROFILE),$(p))))
 
 MK_ALL_OBJS := $(sort $(foreach m,$(MK_MODES),$(call mk_objs,$(m),$(LIB_SRCS)) \
 	$(foreach p,$(MK_PROGRAMS_$(m)),$(call mk_objs,$(m),$(call mk_srcs,$(p))))))
 -include $(MK_ALL_OBJS:.o=.d)
 
-all: debug sanitize $(EXTRA_ALL)
+all: $(MK_ALL_$(PROFILE)) $(EXTRA_ALL)
 
 debug: $(foreach p,$(MK_PROGRAMS_debug),$(call mk_bin,debug,$(p))) $(EXTRA_DEBUG)
-	@echo "debug programs are in $(BIN_ROOT)/$(TAG)-debug/"
+	@echo "=> debug: $(call mk_count,$(MK_PROGRAMS_debug),program,programs) in $(BIN_ROOT)/$(TAG)-debug/"
 
 ifeq ($(MK_SANITIZE_OK),yes)
 sanitize: $(foreach p,$(MK_PROGRAMS_sanitize),$(call mk_bin,sanitize,$(p)))
-	@echo "sanitize ($(SANITIZE)) programs are in $(BIN_ROOT)/$(TAG)-sanitize/"
+	@echo "=> sanitize ($(SANITIZE)): $(call mk_count,$(MK_PROGRAMS_sanitize),program,programs) in\
+	 $(BIN_ROOT)/$(TAG)-sanitize/$(if $(MK_PROGRAMS_static),; static$(comma) so not sanitized: $(MK_PROGRAMS_static))"
 else
 sanitize:
-	@echo "skipped sanitize: $(CC) cannot link -fsanitize=$(SANITIZE)"
+	@echo "=> sanitize ($(SANITIZE)): skipped, $(CC) cannot link -fsanitize=$(SANITIZE)"
 endif
 
 release: $(foreach p,$(MK_PROGRAMS_release),$(call mk_bin,release,$(p))) $(EXTRA_RELEASE)
-	@echo "release programs are in $(BIN_ROOT)/$(TAG)-release/"
+	@echo "=> release: $(call mk_count,$(MK_PROGRAMS_release),program,programs) in $(BIN_ROOT)/$(TAG)-release/"
 
 MK_COMPDB_SRCS := $(sort $(LIB_SRCS) $(foreach p,$(PROGRAMS),$(call mk_srcs,$(p))))
 mk_json_list = $(subst $(space),$(comma)$(space),$(strip $(foreach a,$(1),"$(a)")))
 mk_compdb_entry = {"directory": "$(CURDIR)", "file": "$(CURDIR)/$(1)", "arguments": [$(call mk_json_list,$(CC) \
-	$(MK_COMMON_CFLAGS) $(MK_CFLAGS_debug) $(CFLAGS) -c $(1) -o $(call mk_objs,debug,$(1)))]}
+	$(MK_COMMON_CFLAGS) $(MK_CFLAGS_$(PROFILE)) $(CFLAGS) -c $(1) -o $(call mk_objs,$(PROFILE),$(1)))]}
 
 compdb: compile_commands.json $(EXTRA_COMPDB)
 
 compile_commands.json: $(MK_PROBE) FORCE
 	@$(file >$@.tmp,[$(newline)$(subst }$(space){,}$(comma)$(newline){,$(foreach s,$(MK_COMPDB_SRCS),$(call mk_compdb_entry,$(s))))$(newline)])
-	@if cmp -s $@.tmp $@; then rm -f $@.tmp; echo "$@ unchanged"; else mv $@.tmp $@; echo "wrote $@"; fi
+	@if cmp -s $@.tmp $@; then rm -f $@.tmp; state=unchanged; else mv $@.tmp $@; state=written; fi; \
+	echo "=> $@: $(call mk_count,$(MK_COMPDB_SRCS),entry,entries) with the $(PROFILE) flags, $$state"
 
 FORCE:
 
+MK_UNUSED_DEFS = $(filter -D% -U%,$(MK_CFLAGS_$(PROFILE)))
+
 unused:
 	@if command -v $(CLANG) > /dev/null 2>&1; then \
+	    echo "=> unused (clang): -Wunused -Wunused-parameter -Wunused-macros over\
+	 $(call mk_count,$(MK_COMPDB_SRCS),source,sources) with the $(PROFILE) definitions"; \
 	    for s in $(MK_COMPDB_SRCS); do \
-	        $(CLANG) -fsyntax-only $(MK_COMMON_CFLAGS) -Wno-everything -Wunused -Wunused-parameter \
-	            -Wunused-macros $$s; \
+	        $(CLANG) -fsyntax-only $(MK_COMMON_CFLAGS) $(MK_UNUSED_DEFS) -Wno-everything -Wunused \
+	            -Wunused-parameter -Wunused-macros $$s; \
 	    done; \
 	else \
-	    echo "$(CLANG) not found, skipped the per-file check"; \
+	    echo "=> unused (clang): skipped, $(CLANG) not found"; \
 	fi
 	@if command -v $(CPPCHECK) > /dev/null 2>&1; then \
-	    $(CPPCHECK) --enable=unusedFunction --quiet $(CPPFLAGS_EXTRA) \
+	    echo "=> unused (cppcheck): unusedFunction over $(call mk_count,$(MK_COMPDB_SRCS),source,sources)"; \
+	    $(CPPCHECK) --enable=unusedFunction --quiet $(CPPFLAGS_EXTRA) $(MK_UNUSED_DEFS) \
 	        --template='{file}:{line}:{column}: {severity}: {message} [{id}]' $(MK_COMPDB_SRCS) 2>&1 | \
 	        grep '\[unusedFunction\]' || true; \
 	else \
-	    echo "$(CPPCHECK) not found, skipped the cross-file check"; \
+	    echo "=> unused (cppcheck): skipped, $(CPPCHECK) not found"; \
 	fi
 
 endif
@@ -224,47 +244,68 @@ index: compdb tags cscope
 
 tags:
 	@if command -v $(CTAGS) > /dev/null 2>&1; then \
-	    $(CTAGS) -f tags $(MK_INDEX_SRCS) $(EXTRA_INDEX_SRCS) && echo "wrote tags"; \
+	    $(CTAGS) -f tags $(MK_INDEX_SRCS) $(EXTRA_INDEX_SRCS) && \
+	    echo "=> tags: $(call mk_count,$(MK_INDEX_SRCS) $(EXTRA_INDEX_SRCS),file,files)"; \
 	else \
-	    echo "$(CTAGS) not found, skipped tags"; \
+	    echo "=> tags: skipped, $(CTAGS) not found"; \
 	fi
 
 cscope:
 	@if command -v $(CSCOPE) > /dev/null 2>&1; then \
 	    printf '%s\n' $(MK_INDEX_SRCS) $(EXTRA_INDEX_SRCS) > cscope.files && \
-	    $(CSCOPE) -bkqu -i cscope.files && echo "wrote cscope.out"; \
+	    $(CSCOPE) -bkqu -i cscope.files && \
+	    echo "=> cscope.out: $(call mk_count,$(MK_INDEX_SRCS) $(EXTRA_INDEX_SRCS),file,files)"; \
 	else \
-	    echo "$(CSCOPE) not found, skipped cscope.out"; \
+	    echo "=> cscope.out: skipped, $(CSCOPE) not found"; \
 	fi
 
 clean-index: $(EXTRA_CLEAN_INDEX)
-	rm -f $(MK_INDEX_FILES)
+	@rm -f $(MK_INDEX_FILES)
+	@echo "=> clean-index: removed compile_commands.json, tags and cscope.*"
 
 clean: $(EXTRA_CLEAN)
-	rm -rf $(BIN_ROOT) $(BUILD_ROOT)
+	@rm -rf $(BIN_ROOT) $(BUILD_ROOT)
+	@echo "=> clean: removed $(BIN_ROOT)/ and $(BUILD_ROOT)/"
 
 distclean: clean clean-index $(EXTRA_DISTCLEAN)
-	rm -rf $(MK_TOOL_OUTPUTS) $(MK_CACHES)
+	@rm -rf $(MK_TOOL_OUTPUTS) $(MK_CACHES)
+	@echo "=> distclean: removed tool outputs (gmon.out, perf.data, uftrace.data, core, valgrind) and $(MK_CACHES)/"
 
 format:
-	$(CLANG_FORMAT) -i $(MK_FORMAT_SRCS)
+	@$(CLANG_FORMAT) -i $(MK_FORMAT_SRCS)
+	@echo "=> format: $(call mk_count,$(MK_FORMAT_SRCS),file,files) formatted in place"
 
 format-check:
-	$(CLANG_FORMAT) --dry-run --Werror $(MK_FORMAT_SRCS)
+	@$(CLANG_FORMAT) --dry-run --Werror $(MK_FORMAT_SRCS)
+	@echo "=> format-check: $(call mk_count,$(MK_FORMAT_SRCS),file,files) already formatted"
 
 help:
 	@printf '%s\n' \
-	    'make, make all    debug and sanitize builds' \
-	    'make debug        debug build: -O0, full debug info, -pg, no injected hardening' \
-	    'make sanitize     debug build with -fsanitize=$$SANITIZE (default address)' \
-	    'make release      optimized, hardened build with LTO' \
-	    'make index        compile_commands.json, tags and cscope (also compdb, tags, cscope)' \
-	    'make clean-index  remove the index files' \
-	    'make clean        remove every build product' \
-	    'make distclean    clean, clean-index, tool outputs and caches' \
-	    'make unused       unused diagnostics of every source (clang) and unused functions (cppcheck)' \
-	    'make format       clang-format the sources (format-check only reports)' \
-	    'variables: CC=gcc|clang|<cross compiler>, SANITIZE=address|undefined|thread|...' \
-	    $(if $(PROGRAMS),'programs: $(PROGRAMS)')
+	    'usage: make [goal ...] [VARIABLE=value ...]' \
+	    '' \
+	    'goals:' \
+	    '  all           the debug and sanitize builds, or the release build with PROFILE=release' \
+	    '  debug         -O0, full debug info, -pg, no injected hardening, no PIE' \
+	    '  sanitize      the debug flags plus -fsanitize=SANITIZE' \
+	    '  release       -O2, hardened, PIE, LTO' \
+	    '  index         compile_commands.json with the PROFILE flags, tags and cscope.out' \
+	    '  compdb        compile_commands.json only (tags and cscope make the other two)' \
+	    '  clean-index   remove compile_commands.json, tags and cscope.*' \
+	    '  clean         remove bin/ and build/' \
+	    '  distclean     clean, clean-index, tool outputs and .cache/' \
+	    '  unused        unused diagnostics of every source (clang) and unused functions (cppcheck)' \
+	    '  format        clang-format every source in place (format-check only lists the changes)' \
+	    $(EXTRA_HELP_GOALS) \
+	    '  help          print this help' \
+	    '' \
+	    'variables:' \
+	    '  PROFILE=debug|release  what all builds and which flags index and unused use (default debug)' \
+	    '  SANITIZE=<list>        sanitizers of the sanitize build, comma separated (default address)' \
+	    '  CC=<compiler>          gcc (default), clang or a cross compiler such as aarch64-linux-gnu-gcc' \
+	    $(EXTRA_HELP_VARIABLES) \
+	    '' \
+	    'Each mode builds into bin/<target>-<mode>/ and build/<target>-<mode>/, where <target> is' \
+	    '<arch>-linux-<cc>, for example bin/x86_64-linux-gcc-debug/. Goals run in the order given.' \
+	    $(if $(PROGRAMS),'' 'programs:' $(foreach p,$(PROGRAMS),'  $(p)'))
 
 endif
