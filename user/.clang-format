@@ -5,9 +5,12 @@ BreakBeforeBraces: Custom
 BraceWrapping:
     AfterFunction: true
 InsertBraces: true
-AllowShortFunctionsOnASingleLine: None
+AllowShortFunctionsOnASingleLine:
+    Empty: false
+    Inline: false
+    Other: false
 AllowShortEnumsOnASingleLine: false
-Cpp11BracedListStyle: false
+Cpp11BracedListStyle: Block
 AlignTrailingComments:
     Kind: Never
 AlignEscapedNewlines: Left
