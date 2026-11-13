@@ -1,18 +1,20 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdint.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/ioctl.h>
-#include <string.h>
-#include <errno.h>
-#include <limits.h>
-#include <ctype.h>
-#include <getopt.h>
+#define _POSIX_C_SOURCE 200809L
 
 #include "pagewalkerctl.h"
 
-static void print_usage(const char *prog_name)
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <getopt.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
+static void print_usage(const char *const prog_name)
 {
     fprintf(stderr,
             "Usage:\n"
@@ -51,67 +53,80 @@ static unsigned int get_system_pid_max(void)
 {
     FILE *f = fopen(PID_MAX_FILE, "r");
     unsigned int max = PID_MAX_FALLBACK;
-    if (f) {
+
+    if (f != NULL) {
         if (fscanf(f, "%u", &max) != 1) {
             max = PID_MAX_FALLBACK;
         }
         fclose(f);
+        f = NULL;
     }
     return max;
 }
 
 int main(int argc, char *argv[])
 {
-    int fd = -1;
-    int ret_code = EXIT_FAILURE;
-    int kernel = 0;
-    int force_tty = 0;
-    int have_size = 0;
-    int allow_mmio = 0;
-    int no_report = 0;
+    int is_kernel = 0;
+    int is_forced = 0;
+    int is_mmio_allowed = 0;
+    int should_skip_report = 0;
     int cols = 16;
     int group = 8;
-    int upper = 0;
+    int is_uppercase = 0;
     enum out_fmt fmt = FMT_HEX;
-    unsigned int pid = 0;
-    unsigned long long start = 0;
-    unsigned long long size = 0;
-    int npos;
-    int opt;
 
-    enum { OPT_ALLOW_MMIO = 1000,
-           OPT_NO_REPORT };
-    static struct option long_options[] = {
-        { "help", no_argument, 0, 'h' },
-        { "kernel", no_argument, 0, 'k' },
-        { "raw", no_argument, 0, 'r' },
-        { "hex", no_argument, 0, 'x' },
-        { "cjk", no_argument, 0, 'c' },
-        { "force", no_argument, 0, 'F' },
-        { "upper", no_argument, 0, 'u' },
-        { "format", required_argument, 0, 'f' },
-        { "cols", required_argument, 0, 'w' },
-        { "group", required_argument, 0, 'g' },
-        { "allow-mmio", no_argument, 0, OPT_ALLOW_MMIO },
-        { "no-report", no_argument, 0, OPT_NO_REPORT },
-        { 0, 0, 0, 0 }
+    enum {
+        OPT_ALLOW_MMIO = 1000,
+        OPT_NO_REPORT,
+    };
+    static struct option s_long_options[] = {
+        { "help", no_argument, NULL, 'h' },
+        { "kernel", no_argument, NULL, 'k' },
+        { "raw", no_argument, NULL, 'r' },
+        { "hex", no_argument, NULL, 'x' },
+        { "cjk", no_argument, NULL, 'c' },
+        { "force", no_argument, NULL, 'F' },
+        { "upper", no_argument, NULL, 'u' },
+        { "format", required_argument, NULL, 'f' },
+        { "cols", required_argument, NULL, 'w' },
+        { "group", required_argument, NULL, 'g' },
+        { "allow-mmio", no_argument, NULL, OPT_ALLOW_MMIO },
+        { "no-report", no_argument, NULL, OPT_NO_REPORT },
+        { NULL, 0, NULL, 0 },
     };
 
-    while ((opt = getopt_long(argc, argv, "hkrxcFuf:w:g:", long_options, NULL)) != -1) {
+    for (int opt = getopt_long(argc, argv, "hkrxcFuf:w:g:", s_long_options, NULL); opt != -1;
+         opt = getopt_long(argc, argv, "hkrxcFuf:w:g:", s_long_options, NULL)) {
         switch (opt) {
         case 'h':
             print_usage(argv[0]);
-            return EXIT_SUCCESS;
-        case 'k':            kernel = 1; break;
-        case 'r':            fmt = FMT_RAW; break;
-        case 'x':            fmt = FMT_HEX; break;
-        case 'c':            fmt = FMT_CJK; break;
-        case 'F':            force_tty = 1; break;
-        case 'u':            upper = 1; break;
-        case OPT_ALLOW_MMIO: allow_mmio = 1; break;
-        case OPT_NO_REPORT:  no_report = 1; break;
-        case 'w':            {
-            char *e;
+            return 0;
+        case 'k':
+            is_kernel = 1;
+            break;
+        case 'r':
+            fmt = FMT_RAW;
+            break;
+        case 'x':
+            fmt = FMT_HEX;
+            break;
+        case 'c':
+            fmt = FMT_CJK;
+            break;
+        case 'F':
+            is_forced = 1;
+            break;
+        case 'u':
+            is_uppercase = 1;
+            break;
+        case OPT_ALLOW_MMIO:
+            is_mmio_allowed = 1;
+            break;
+        case OPT_NO_REPORT:
+            should_skip_report = 1;
+            break;
+        case 'w': {
+            char *e = NULL;
             long v = strtol(optarg, &e, 10);
 
             if (*e != '\0' || v < 1 || v > 256) {
@@ -122,7 +137,7 @@ int main(int argc, char *argv[])
             break;
         }
         case 'g': {
-            char *e;
+            char *e = NULL;
             long v = strtol(optarg, &e, 10);
 
             if (*e != '\0' || v < 0 || v > 256) {
@@ -133,11 +148,11 @@ int main(int argc, char *argv[])
             break;
         }
         case 'f':
-            if (!strcmp(optarg, "hex")) {
+            if (strcmp(optarg, "hex") == 0) {
                 fmt = FMT_HEX;
-            } else if (!strcmp(optarg, "raw")) {
+            } else if (strcmp(optarg, "raw") == 0) {
                 fmt = FMT_RAW;
-            } else if (!strcmp(optarg, "cjk") || !strcmp(optarg, "utf8")) {
+            } else if (strcmp(optarg, "cjk") == 0 || strcmp(optarg, "utf8") == 0) {
                 fmt = FMT_CJK;
             } else {
                 fprintf(stderr, "Error: unknown format '%s' (hex|raw|cjk).\n", optarg);
@@ -150,25 +165,26 @@ int main(int argc, char *argv[])
         }
     }
 
-    npos = argc - optind;
+    int npos = argc - optind;
+    unsigned int pid = 0;
+    unsigned long long start = 0;
+    unsigned long long size = 0;
+    int has_size = 0;
 
-    if (kernel) {
-        int r;
-
+    if (is_kernel != 0) {
         if (npos < 1 || npos > 2) {
             fprintf(stderr, "Error: expected <symbol|0xaddr> [size].\n");
             return EXIT_FAILURE;
         }
-        r = resolve_ksym(argv[optind], &start);
+
+        int r = resolve_ksym(&start, argv[optind]);
         if (r == 1) {
             fprintf(stderr, "Error: symbol '%s' not found in /proc/kallsyms.\n", argv[optind]);
             return EXIT_FAILURE;
         }
         if (r == 2) {
             fprintf(stderr,
-                    "Error: '%s' resolves to 0 (kernel.kptr_restrict hides symbol addresses). "
-                    "Run as root; if kptr_restrict=2 even root is blocked, so lower it or pass "
-                    "-k 0x<address> directly.\n",
+                    "Error: '%s' resolves to 0 (kernel.kptr_restrict hides symbol addresses). Run as root; if kptr_restrict=2 even root is blocked, so lower it or pass -k 0x<address> directly.\n",
                     argv[optind]);
             return EXIT_FAILURE;
         }
@@ -181,23 +197,26 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
         if (npos == 2) {
-            if (parse_size(argv[optind + 1], &size) != 0) {
+            if (parse_size(&size, argv[optind + 1]) != 0) {
                 fprintf(stderr, "Error: invalid size '%s'.\n", argv[optind + 1]);
                 return EXIT_FAILURE;
             }
-            have_size = 1;
+            has_size = 1;
         }
     } else {
-        char *endptr;
-        long pid_long;
-
-        if (npos < 2 || npos > 3) {
-            fprintf(stderr, npos < 2 ? "Error: too few arguments.\n"
-                                     : "Error: too many arguments.\n");
+        if (npos < 2) {
+            fprintf(stderr, "Error: too few arguments.\n");
             return EXIT_FAILURE;
         }
+        if (npos > 3) {
+            fprintf(stderr, "Error: too many arguments.\n");
+            return EXIT_FAILURE;
+        }
+
+        char *endptr = NULL;
+
         errno = 0;
-        pid_long = strtol(argv[optind], &endptr, BASE_DECIMAL);
+        long pid_long = strtol(argv[optind], &endptr, BASE_DECIMAL);
         if (errno != 0 || *endptr != '\0' || argv[optind][0] == '\0' || pid_long <= 0) {
             fprintf(stderr, "Error: Invalid PID.\n");
             return EXIT_FAILURE;
@@ -226,22 +245,22 @@ int main(int argc, char *argv[])
             if (*h == '\0') {
                 is_hex = 0;
             }
-            for (; *h; ++h) {
-                if (!isxdigit((unsigned char)*h)) {
+            for (; *h != '\0'; ++h) {
+                if (isxdigit((unsigned char)*h) == 0) {
                     is_hex = 0;
                     break;
                 }
             }
 
-            if (is_hex) {
-                if (parse_vaddr(tgt, &start) != 0) {
+            if (is_hex != 0) {
+                if (parse_vaddr(&start, tgt) != 0) {
                     fprintf(stderr, "Error: Invalid Address.\n");
                     return EXIT_FAILURE;
                 }
             } else {
                 char err[256];
 
-                if (resolve_user_sym(pid, tgt, &start, err, sizeof(err)) != 0) {
+                if (resolve_user_sym(&start, err, sizeof(err), pid, tgt) != 0) {
                     fprintf(stderr, "Error: %s\n", err);
                     return EXIT_FAILURE;
                 }
@@ -249,11 +268,11 @@ int main(int argc, char *argv[])
             }
         }
         if (npos == 3) {
-            if (parse_size(argv[optind + 2], &size) != 0) {
+            if (parse_size(&size, argv[optind + 2]) != 0) {
                 fprintf(stderr, "Error: invalid size '%s'.\n", argv[optind + 2]);
                 return EXIT_FAILURE;
             }
-            have_size = 1;
+            has_size = 1;
         }
     }
 
@@ -262,30 +281,34 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    fd = open(PAGEWALKER_PATH, O_RDWR);
+    int fd = open(PAGEWALKER_PATH, O_RDWR);
     if (fd < 0) {
         switch (errno) {
         case EACCES:
-            fprintf(stderr, "Error: cannot open %s: Permission denied (run as root, e.g. with sudo).\n",
+            fprintf(stderr,
+                    "Error: cannot open %s: Permission denied (run as root, e.g. with sudo).\n",
                     PAGEWALKER_PATH);
             break;
         case ENOENT:
-            fprintf(stderr, "Error: %s not found (is the module loaded?).\n",
-                    PAGEWALKER_PATH);
+            fprintf(stderr, "Error: %s not found (is the module loaded?).\n", PAGEWALKER_PATH);
             break;
         case EPERM:
-            fprintf(stderr, "Error: cannot open %s: Operation not permitted (CAP_SYS_RAWIO is required).\n",
+            fprintf(stderr,
+                    "Error: cannot open %s: Operation not permitted (CAP_SYS_RAWIO is required).\n",
                     PAGEWALKER_PATH);
             break;
         default:
             perror("Error opening device");
             break;
         }
-        goto cleanup;
+        return EXIT_FAILURE;
     }
 
+    int ret_code = EXIT_FAILURE;
+    unsigned char *data = NULL;
+
     /* Legacy path: a process walk with no dump uses command 1 verbatim. */
-    if (!kernel && !have_size) {
+    if (is_kernel == 0 && has_size == 0) {
         struct pagewalker_request req;
         char buf[BUFFER_SIZE];
 
@@ -308,33 +331,32 @@ int main(int argc, char *argv[])
                 perror("ioctl");
                 break;
             }
-            goto cleanup;
+            goto out_close_fd;
         }
 
         build_report(buf, &req.info, req.pid, 0);
         printf("%s", buf);
-        ret_code = EXIT_SUCCESS;
-        goto cleanup;
+        ret_code = 0;
+        goto out_close_fd;
     }
 
     /* Read path (command 2): fills the walk of the start address and the bytes. */
     {
         struct pagewalker_result info;
-        unsigned char *data = NULL;
         unsigned long long got = 0;
         unsigned int stopped = PW_STOP_OK;
-        int r;
 
         memset(&info, 0, sizeof(info));
-        if (size) {
+        if (size != 0) {
             data = malloc(size);
-            if (!data) {
+            if (data == NULL) {
                 fprintf(stderr, "Error: out of memory for %llu bytes.\n", size);
-                goto cleanup;
+                goto out_close_fd;
             }
         }
 
-        r = do_read(fd, kernel, allow_mmio, pid, start, size, data, &got, &stopped, &info);
+        int r = do_read(data, &got, &stopped, &info, fd, is_kernel, is_mmio_allowed, pid, start,
+                        size);
         if (r < 0) {
             switch (-r) {
             case ESRCH:
@@ -345,80 +367,77 @@ int main(int argc, char *argv[])
                 break;
             case EOPNOTSUPP:
                 fprintf(stderr,
-                        "Error: kernel-space walk is not supported on this arm64 "
-                        "configuration (52-bit PA / LPA2).\n");
+                        "Error: kernel-space walk is not supported on this arm64 configuration (52-bit PA / LPA2).\n");
                 break;
             default:
                 errno = -r;
                 perror("ioctl");
                 break;
             }
-            free(data);
-            goto cleanup;
+            goto out_free_data;
         }
         if (stopped == PW_STOP_NONCANON || stopped == PW_STOP_NOTKERNEL) {
             fprintf(stderr, "Error: 0x%llx is not a %s address.\n", start,
-                    stopped == PW_STOP_NOTKERNEL ? "kernel" : "canonical");
-            free(data);
-            goto cleanup;
+                    (stopped == PW_STOP_NOTKERNEL) ? "kernel" : "canonical");
+            goto out_free_data;
         }
 
         if (fmt == FMT_RAW) {
-            if (!force_tty && isatty(STDOUT_FILENO)) {
+            if (is_forced == 0 && isatty(STDOUT_FILENO) != 0) {
                 fprintf(stderr,
                         "Error: refusing to write raw bytes to a terminal; pipe the output or pass -F.\n");
-                free(data);
-                goto cleanup;
+                goto out_free_data;
             }
-            if (got && fwrite(data, 1, (size_t)got, stdout) != (size_t)got) {
+            if (got != 0 && fwrite(data, 1, (size_t)got, stdout) != (size_t)got) {
                 perror("write");
-                free(data);
-                goto cleanup;
+                goto out_free_data;
             }
             if (stopped != PW_STOP_OK) {
-                fprintf(stderr, "Note: stopped after %llu of %llu bytes (%s).\n",
-                        got, size, stop_reason(stopped));
+                fprintf(stderr, "Note: stopped after %llu of %llu bytes (%s).\n", got, size,
+                        describe_stop_reason(stopped));
             }
         } else {
             char buf[BUFFER_SIZE];
 
-            if (!no_report) {
-                build_report(buf, &info, pid, kernel);
+            if (should_skip_report == 0) {
+                build_report(buf, &info, pid, is_kernel);
                 printf("%s", buf);
             }
-            if (size) {
+            if (size != 0) {
                 char szs[32];
 
-                human_size(szs, sizeof(szs), info.page_size);
-                printf("\n=== Memory Dump: %llu of %llu byte%s ===\n",
-                       got, size, size == 1 ? "" : "s");
+                format_human_size(szs, sizeof(szs), info.page_size);
+                printf("\n=== Memory Dump: %llu of %llu byte%s ===\n", got, size,
+                       (size == 1) ? "" : "s");
                 printf("  Start VA : 0x%016llx\n", start);
-                if (info.is_valid) {
+                if (info.is_valid != 0) {
                     printf("  Start PA : 0x%016llx  (%s leaf at %s%s)\n",
                            (unsigned long long)info.final_phys_addr, szs,
-                           leaf_level_name(info.mapping_level),
-                           info.is_contiguous ? ", contiguous" : "");
+                           get_leaf_level_name(info.mapping_level),
+                           (info.is_contiguous != 0) ? ", contiguous" : "");
                 }
                 printf("  Offsets below are relative to the start VA.\n");
                 if (stopped != PW_STOP_OK) {
-                    printf("  (stopped: %s)\n", stop_reason(stopped));
+                    printf("  (stopped: %s)\n", describe_stop_reason(stopped));
                 }
                 printf("\n");
-                dump_bytes(stdout, data, (size_t)got, fmt == FMT_CJK, cols, group, upper);
+                dump_bytes(stdout, data, (size_t)got, fmt == FMT_CJK, cols, group, is_uppercase);
             }
         }
 
-        free(data);
-        ret_code = EXIT_SUCCESS;
+        ret_code = 0;
     }
 
-cleanup:
-    if (fd >= 0) {
-        close(fd);
-    }
-    /* A truncated or failed write (full pipe, closed reader, disk full) must not
-     * be reported as success; fflush surfaces a deferred stdio write error. */
-    if (ret_code == EXIT_SUCCESS && fflush(stdout) != 0) {
+out_free_data:
+    free(data);
+    data = NULL;
+out_close_fd:
+    close(fd);
+    /*
+     * A truncated or failed write (full pipe, closed reader, disk full) must not
+     * be reported as success; fflush surfaces a deferred stdio write error.
+     */
+    if (ret_code == 0 && fflush(stdout) != 0) {
         perror("write");
         ret_code = EXIT_FAILURE;
     }

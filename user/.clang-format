@@ -1,25 +1,26 @@
-# User-side code: a custom readable style.
-# InsertBraces makes braces mandatory on EVERY control/loop body, even a single
-# statement. ColumnLimit is 0 so clang-format does not re-wrap hand-formatted
-# lines; it enforces braces, brace placement, and kernel-style case alignment.
 BasedOnStyle: LLVM
-SortIncludes: false
 IndentWidth: 4
-UseTab: Never
-TabWidth: 4
 ColumnLimit: 0
-ContinuationIndentWidth: 4
-BreakBeforeBraces: Linux
+BreakBeforeBraces: Custom
+BraceWrapping:
+    AfterFunction: true
 InsertBraces: true
 AllowShortFunctionsOnASingleLine: None
-AllowShortIfStatementsOnASingleLine: false
-AllowShortLoopsOnASingleLine: false
-AllowShortCaseLabelsOnASingleLine: true
-IndentCaseLabels: false
-AlignConsecutiveShortCaseStatements:
-  Enabled: true
-  AcrossComments: false
-PointerAlignment: Right
-SpaceAfterCStyleCast: false
-# Spaces inside braced initializers: { a, b } rather than {a, b}.
+AllowShortEnumsOnASingleLine: false
 Cpp11BracedListStyle: false
+AlignTrailingComments:
+    Kind: Never
+AlignEscapedNewlines: Left
+IndentPPDirectives: AfterHash
+PPIndentWidth: 1
+IncludeBlocks: Regroup
+IncludeCategories:
+    - Regex: '^<readline/'
+      Priority: 1
+      SortPriority: 2
+    - Regex: '^<'
+      Priority: 1
+      SortPriority: 1
+    - Regex: '^"'
+      Priority: 3
+InsertNewlineAtEOF: true

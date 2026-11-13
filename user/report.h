@@ -1,5 +1,5 @@
-#ifndef PAGEWALKER_USER_REPORT_H
-#define PAGEWALKER_USER_REPORT_H
+#ifndef USER_REPORT_H
+#define USER_REPORT_H
 
 #include <stddef.h>
 
@@ -7,7 +7,8 @@
 
 #define BUFFER_SIZE 16384
 
-/* ------------------------------------------------------------------------- *
+/*
+ * -------------------------------------------------------------------------
  * Architecture identity (user side)
  *
  * The report skeleton is shared; only the arch / root-register names and the
@@ -15,31 +16,32 @@
  * geometry (level count, VA width, page size) is reported by the kernel at
  * runtime, so the address breakdown and the step list are computed, not
  * hardcoded.
- * ------------------------------------------------------------------------- */
+ * -------------------------------------------------------------------------
+ */
 #if defined(__x86_64__)
-#define PW_ARCH_NAME "x86-64"
-#define PW_ROOT_REG_NAME "CR3"
-#define PW_CONT_TERM "contiguous"
+# define PW_ARCH_NAME "x86-64"
+# define PW_ROOT_REG_NAME "CR3"
+# define PW_CONT_TERM "contiguous"
 #elif defined(__aarch64__)
-#define PW_ARCH_NAME "arm64"
-#define PW_ROOT_REG_NAME "TTBR0_EL1"
-#define PW_CONT_TERM "ARM64 contiguous (cont-PTE/cont-PMD)"
+# define PW_ARCH_NAME "arm64"
+# define PW_ROOT_REG_NAME "TTBR0_EL1"
+# define PW_CONT_TERM "ARM64 contiguous (cont-PTE/cont-PMD)"
 #elif defined(__riscv) && (__riscv_xlen == 64)
-#define PW_ARCH_NAME "riscv64"
-#define PW_ROOT_REG_NAME "satp"
-#define PW_CONT_TERM "RISC-V NAPOT"
+# define PW_ARCH_NAME "riscv64"
+# define PW_ROOT_REG_NAME "satp"
+# define PW_CONT_TERM "RISC-V NAPOT"
 #else
-#error "pagewalker: unsupported architecture (need x86-64, arm64, or riscv64)"
+# error "pagewalker: unsupported architecture (need x86-64, arm64, or riscv64)"
 #endif
 
-/* Render the full walk report into `buf` (BUFFER_SIZE bytes); returns length. */
-int build_report(char *buf, const struct pagewalker_result *res, unsigned int pid,
-                 int kernel_mode);
+/* Render the full walk report into `mut_buf` (BUFFER_SIZE bytes); returns length. */
+int build_report(char *const mut_buf, const struct pagewalker_result *const res, unsigned int pid,
+                 int is_kernel_mode);
 
 /* Short name of the page-table level that held the final leaf entry. */
-const char *leaf_level_name(unsigned int lvl);
+const char *get_leaf_level_name(unsigned int lvl);
 
 /* Format a byte count as an exact binary-unit string (e.g. "2 MiB", "64 KiB"). */
-void human_size(char *out, size_t cap, unsigned long long bytes);
+void format_human_size(char *const mut_out, size_t cap, unsigned long long bytes);
 
-#endif /* PAGEWALKER_USER_REPORT_H */
+#endif /* USER_REPORT_H */

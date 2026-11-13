@@ -1,11 +1,11 @@
-#ifndef PAGEWALKERCTL_H
-#define PAGEWALKERCTL_H
+#ifndef USER_PAGEWALKERCTL_H
+#define USER_PAGEWALKERCTL_H
 
 #include "../include/pagewalker_common.h"
-#include "report.h"
 #include "dump.h"
-#include "symbols.h"
 #include "read.h"
+#include "report.h"
+#include "symbols.h"
 
 #define PID_MAX_FILE "/proc/sys/kernel/pid_max"
 /*
@@ -18,8 +18,10 @@
 #define BASE_DECIMAL 10
 
 /* Output rendering for the byte dump, selected on the command line. */
-enum out_fmt { FMT_HEX,
-               FMT_RAW,
-               FMT_CJK };
+enum out_fmt {
+    FMT_HEX,
+    FMT_RAW,
+    FMT_CJK,
+};
 
-#endif /* PAGEWALKERCTL_H */
+#endif /* USER_PAGEWALKERCTL_H */

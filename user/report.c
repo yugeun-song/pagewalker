@@ -1,317 +1,57 @@
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdarg.h>
-
 #include "report.h"
 
-/* Append `s` to out[pos], not exceeding cap; returns the new length. */
-static int append_str(char *out, int pos, int cap, const char *s)
-{
-    int i = 0;
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
-    while (s[i] != '\0' && pos < cap - 1) {
-        out[pos] = s[i];
-        ++pos;
-        ++i;
-    }
-    out[pos] = '\0';
-    return pos;
-}
-
-static int __attribute__((format(printf, 3, 4))) snappend(char *out, int cap, const char *fmt, ...)
-{
-    va_list ap;
-    int n;
-
-    if (cap <= 0) {
-        return 0;
-    }
-    va_start(ap, fmt);
-    n = vsnprintf(out, (size_t)cap, fmt, ap);
-    va_end(ap);
-    if (n < 0) {
-        out[0] = '\0';
-        return 0;
-    }
-    if (n >= cap) {
-        return cap - 1;
-    }
-    return n;
-}
-
-/* One-line description of the root translation register for this arch. */
-static void describe_root_reg(char *out, int cap, const struct pagewalker_result *res, int kernel)
-{
 #if defined(__x86_64__)
-    (void)res;
-    snprintf(out, cap,
-             "CR3 holds the PGD/PML4 physical base; one root maps both the user and kernel halves.");
-#elif defined(__aarch64__)
-    (void)res;
-    if (kernel) {
-        snprintf(out, cap,
-                 "TTBR1_EL1 holds the kernel (high-half) translation base; walked here for a kernel address.");
-    } else {
-        snprintf(out, cap,
-                 "TTBR0_EL1 = user (low-half) translation base; TTBR1_EL1 holds the kernel (high-half) base.");
-    }
-#elif defined(__riscv)
-    (void)kernel;
-    int sv = res->paging_level == PAGING_LEVEL_5 ? 57 : res->paging_level == PAGING_LEVEL_4 ? 48
-                                                                                            : 39;
-    snprintf(out, cap,
-             "satp: MODE=Sv%d, root PPN=0x%llx (phys >> %u); one root for the whole address space.",
-             sv, (unsigned long long)(res->root_table_phys >> res->page_shift), res->page_shift);
-#endif
-}
-
-/* Name of the root translation register actually used for this walk. */
-static const char *root_reg_name(int kernel)
-{
-#if defined(__aarch64__)
-    return kernel ? "TTBR1_EL1" : "TTBR0_EL1";
-#else
-    (void)kernel;
-    return PW_ROOT_REG_NAME;
-#endif
-}
-
-/*
- * Decode the flag bits of a present entry into a compact token list. The bit
- * layout is hardware-defined and disjoint across arches (only the present/valid
- * bit at bit 0 coincides), so this is the one decoder that must be per-arch.
- * `huge_capable` marks the PUD/PMD levels (block-capable); `is_pte` marks the
- * last level.
- */
-#if defined(__x86_64__)
-
 /* x86-64 entry flags (low 12 + NX). Bit 7 is PS at PMD/PUD, PAT at PTE. */
-#define PTE_PRESENT (1ULL << 0)
-#define PTE_RW (1ULL << 1)
-#define PTE_USER (1ULL << 2)
-#define PTE_PWT (1ULL << 3)
-#define PTE_PCD (1ULL << 4)
-#define PTE_ACCESSED (1ULL << 5)
-#define PTE_DIRTY (1ULL << 6)
-#define PTE_PSE (1ULL << 7)
-#define PTE_GLOBAL (1ULL << 8)
-#define PTE_NX (1ULL << 63)
-
-static void decode_pte_flags(char *out, int cap, unsigned long long e,
-                             int huge_capable, int is_pte)
-{
-    int leaf = is_pte || (huge_capable && (e & PTE_PSE));
-    int p = 0;
-
-    out[0] = '\0';
-    p = append_str(out, p, cap, "P");
-    p = append_str(out, p, cap, (e & PTE_RW) ? " RW" : " RO");
-    p = append_str(out, p, cap, (e & PTE_USER) ? " U" : " S");
-
-    if (e & PTE_ACCESSED) {
-        p = append_str(out, p, cap, " A");
-    }
-    if (leaf && (e & PTE_DIRTY)) {
-        p = append_str(out, p, cap, " D");
-    }
-    if (e & PTE_PWT) {
-        p = append_str(out, p, cap, " PWT");
-    }
-    if (e & PTE_PCD) {
-        p = append_str(out, p, cap, " PCD");
-    }
-    if (e & PTE_GLOBAL) {
-        p = append_str(out, p, cap, " G");
-    }
-    if (huge_capable && (e & PTE_PSE)) {
-        p = append_str(out, p, cap, " PS");
-    }
-    if (is_pte && (e & PTE_PSE)) {
-        p = append_str(out, p, cap, " PAT");
-    }
-
-    p = append_str(out, p, cap, (e & PTE_NX) ? " NX" : " X");
-}
-
+# define PTE_PRESENT (1ULL << 0)
+# define PTE_RW (1ULL << 1)
+# define PTE_USER (1ULL << 2)
+# define PTE_PWT (1ULL << 3)
+# define PTE_PCD (1ULL << 4)
+# define PTE_ACCESSED (1ULL << 5)
+# define PTE_DIRTY (1ULL << 6)
+# define PTE_PSE (1ULL << 7)
+# define PTE_GLOBAL (1ULL << 8)
+# define PTE_NX (1ULL << 63)
 #elif defined(__aarch64__)
-
 /* arm64 stage-1 descriptor attributes (4KB granule). */
-#define A64_VALID (1ULL << 0)
-#define A64_TABLE (1ULL << 1) /* at PUD/PMD: 1=table, 0=block */
-#define A64_ATTRINDX_SHIFT 2
-#define A64_ATTRINDX_MASK (7ULL << 2) /* MAIR index */
-#define A64_USER (1ULL << 6)          /* AP[1]: 1=EL0 accessible */
-#define A64_RDONLY (1ULL << 7)        /* AP[2]: 1=read-only */
-#define A64_SH_SHIFT 8
-#define A64_SH_MASK (3ULL << 8) /* SH[1:0] shareability */
-#define A64_AF (1ULL << 10)     /* Access Flag (~ x86 Accessed) */
-#define A64_NG (1ULL << 11)     /* not-Global (inverse of x86 G) */
-#define A64_DBM (1ULL << 51)    /* Dirty Bit Management */
-#define A64_CONT (1ULL << 52)   /* Contiguous range */
-#define A64_PXN (1ULL << 53)    /* Privileged eXecute Never */
-#define A64_UXN (1ULL << 54)    /* User eXecute Never */
-#define A64_TABLE_PXN (1ULL << 59)
-#define A64_TABLE_UXN (1ULL << 60)
-#define A64_TABLE_AP_SHIFT 61
-#define A64_TABLE_AP_MASK (3ULL << 61)
-#define A64_TABLE_NS (1ULL << 63)
-
-static void decode_pte_flags(char *out, int cap, unsigned long long e,
-                             int huge_capable, int is_pte)
-{
-    unsigned sh = (unsigned)((e & A64_SH_MASK) >> A64_SH_SHIFT);
-    char ai[16];
-    int p = 0;
-
-    out[0] = '\0';
-    p = append_str(out, p, cap, "V");
-    if (!is_pte && (e & A64_TABLE)) {
-        unsigned apt = (unsigned)((e & A64_TABLE_AP_MASK) >> A64_TABLE_AP_SHIFT);
-
-        p = append_str(out, p, cap, " TABLE");
-        if (e & A64_TABLE_NS) {
-            p = append_str(out, p, cap, " NSTable");
-        }
-        if (apt) {
-            snprintf(ai, sizeof(ai), " APTable=%u", apt);
-            p = append_str(out, p, cap, ai);
-        }
-        if (e & A64_TABLE_UXN) {
-            p = append_str(out, p, cap, " UXNTable");
-        }
-        if (e & A64_TABLE_PXN) {
-            p = append_str(out, p, cap, " PXNTable");
-        }
-        return;
-    }
-    p = append_str(out, p, cap, (e & A64_RDONLY) ? " RO" : " RW");
-    p = append_str(out, p, cap, (e & A64_USER) ? " U" : " S");
-    if (e & A64_AF) {
-        p = append_str(out, p, cap, " AF");
-    }
-    p = append_str(out, p, cap, (e & A64_NG) ? " nG" : " G");
-    p = append_str(out, p, cap, sh == 3 ? " ISH" : sh == 2 ? " OSH"
-                                               : sh == 0   ? " NSH"
-                                                           : " SH?");
-    if (e & A64_CONT) {
-        p = append_str(out, p, cap, " Cont");
-    }
-    if (e & A64_DBM) {
-        p = append_str(out, p, cap, " DBM");
-    }
-    p = append_str(out, p, cap, (e & A64_PXN) ? " PXN" : " PX");
-    p = append_str(out, p, cap, (e & A64_UXN) ? " UXN" : " UX");
-    snprintf(ai, sizeof(ai), " AI=%u",
-             (unsigned)((e & A64_ATTRINDX_MASK) >> A64_ATTRINDX_SHIFT));
-    p = append_str(out, p, cap, ai);
-    if (huge_capable && !(e & A64_TABLE)) {
-        p = append_str(out, p, cap, " BLK");
-    }
-}
-
+# define A64_VALID (1ULL << 0)
+# define A64_TABLE (1ULL << 1) /* at PUD/PMD: 1=table, 0=block */
+# define A64_ATTRINDX_SHIFT 2
+# define A64_ATTRINDX_MASK (7ULL << 2) /* MAIR index */
+# define A64_USER (1ULL << 6) /* AP[1]: 1=EL0 accessible */
+# define A64_RDONLY (1ULL << 7) /* AP[2]: 1=read-only */
+# define A64_SH_SHIFT 8
+# define A64_SH_MASK (3ULL << 8) /* SH[1:0] shareability */
+# define A64_AF (1ULL << 10) /* Access Flag (~ x86 Accessed) */
+# define A64_NG (1ULL << 11) /* not-Global (inverse of x86 G) */
+# define A64_DBM (1ULL << 51) /* Dirty Bit Management */
+# define A64_CONT (1ULL << 52) /* Contiguous range */
+# define A64_PXN (1ULL << 53) /* Privileged eXecute Never */
+# define A64_UXN (1ULL << 54) /* User eXecute Never */
+# define A64_TABLE_PXN (1ULL << 59)
+# define A64_TABLE_UXN (1ULL << 60)
+# define A64_TABLE_AP_SHIFT 61
+# define A64_TABLE_AP_MASK (3ULL << 61)
+# define A64_TABLE_NS (1ULL << 63)
 #elif defined(__riscv)
-
 /* riscv PTE flags: low 8 bits are V R W X U G A D; PPN starts at bit 10. */
-#define RV_V (1ULL << 0)
-#define RV_R (1ULL << 1)
-#define RV_W (1ULL << 2)
-#define RV_X (1ULL << 3)
-#define RV_U (1ULL << 4)
-#define RV_G (1ULL << 5)
-#define RV_A (1ULL << 6)
-#define RV_D (1ULL << 7)
-#define RV_PBMT_SHIFT 61
-#define RV_PBMT_MASK (3ULL << 61)
-#define RV_NAPOT (1ULL << 63)
-
-static void decode_pte_flags(char *out, int cap, unsigned long long e,
-                             int huge_capable, int is_pte)
-{
-    int p = 0;
-
-    (void)huge_capable;
-    (void)is_pte;
-    out[0] = '\0';
-    p = append_str(out, p, cap, "V");
-    if (e & RV_R) {
-        p = append_str(out, p, cap, " R");
-    }
-    if (e & RV_W) {
-        p = append_str(out, p, cap, " W");
-    }
-    if (e & RV_X) {
-        p = append_str(out, p, cap, " X");
-    }
-    p = append_str(out, p, cap, (e & RV_U) ? " U" : " S");
-    if (e & RV_G) {
-        p = append_str(out, p, cap, " G");
-    }
-    if (e & RV_A) {
-        p = append_str(out, p, cap, " A");
-    }
-    if (e & RV_D) {
-        p = append_str(out, p, cap, " D");
-    }
-    /* No R/W/X set means this is a pointer to the next table, not a leaf. */
-    if (!(e & (RV_R | RV_W | RV_X))) {
-        p = append_str(out, p, cap, " (table)");
-    } else {
-        unsigned pbmt = (unsigned)((e & RV_PBMT_MASK) >> RV_PBMT_SHIFT);
-
-        if (e & RV_NAPOT) {
-            p = append_str(out, p, cap, " NAPOT");
-        }
-        if (pbmt) {
-            p = append_str(out, p, cap, pbmt == 1 ? " PBMT=NC" : pbmt == 2 ? " PBMT=IO"
-                                                                           : " PBMT=?");
-        }
-    }
-}
-
-#endif
-
-static void print_step(char *buf, int *offset, const char *level_name,
-                       unsigned long long table_base, unsigned long long idx,
-                       unsigned long long entry_val, unsigned long long readback,
-                       int is_valid_entry, int huge_capable, int is_pte)
-{
-    unsigned long long entry_addr = table_base + (idx * 8);
-
-    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
-                        "[%s]\n", level_name);
-    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
-                        "  Table Base  : 0x%llx\n", table_base);
-    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
-                        "  Index       : 0x%llx (%llu)\n", idx, idx);
-    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
-                        "  Calculation : 0x%llx + (0x%llx * 8) = 0x%llx\n", table_base, idx, entry_addr);
-    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
-                        "  Entry Value : 0x%llx\n", entry_val);
-
-    if (table_base) {
-        if (readback == entry_val) {
-            *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
-                                "  Verify      : *(0x%llx) == 0x%llx  [kernel read-back OK]\n",
-                                entry_addr, entry_val);
-        } else {
-            *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
-                                "  Verify      : *(0x%llx) read 0x%llx != entry 0x%llx  [MISMATCH]\n",
-                                entry_addr, readback, entry_val);
-        }
-    }
-
-    if (is_valid_entry) {
-        char flags[96];
-
-        decode_pte_flags(flags, sizeof(flags), entry_val, huge_capable, is_pte);
-        *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
-                            "  Flags       : %s\n", flags);
-    }
-
-    *offset += snappend(buf + *offset, BUFFER_SIZE - *offset,
-                        "  Status      : %s\n\n", is_valid_entry ? "Valid (Present)" : "Not Present / Empty");
-}
+# define RV_V (1ULL << 0)
+# define RV_R (1ULL << 1)
+# define RV_W (1ULL << 2)
+# define RV_X (1ULL << 3)
+# define RV_U (1ULL << 4)
+# define RV_G (1ULL << 5)
+# define RV_A (1ULL << 6)
+# define RV_D (1ULL << 7)
+# define RV_PBMT_SHIFT 61
+# define RV_PBMT_MASK (3ULL << 61)
+# define RV_NAPOT (1ULL << 63)
+#endif /* defined(__x86_64__) */
 
 /* One address field: its bit range, short name, value and width in bits. */
 struct addr_field {
@@ -329,16 +69,300 @@ struct level_info {
     unsigned long long base_phys;
     unsigned long long val;
     unsigned long long readback;
-    int huge_capable;
+    int is_huge_capable;
     int is_pte;
 };
+
+/* Append `s` to mut_out[pos], not exceeding cap; returns the new length. */
+static int append_str(char *const mut_out, int pos, int cap, const char *const s)
+{
+    int i = 0;
+
+    while (s[i] != '\0' && pos < cap - 1) {
+        mut_out[pos] = s[i];
+        ++pos;
+        ++i;
+    }
+    mut_out[pos] = '\0';
+    return pos;
+}
+
+static int __attribute__((format(printf, 3, 4))) append_formatted(char *const mut_out, int cap,
+                                                                  const char *const fmt, ...)
+{
+    if (cap <= 0) {
+        return 0;
+    }
+
+    va_list ap;
+
+    va_start(ap, fmt);
+    int n = vsnprintf(mut_out, (size_t)cap, fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        mut_out[0] = '\0';
+        return 0;
+    }
+    if (n >= cap) {
+        return cap - 1;
+    }
+    return n;
+}
+
+/* One-line description of the root translation register for this arch. */
+static void describe_root_reg(char *const mut_out, size_t cap,
+                              const struct pagewalker_result *const res, int is_kernel)
+{
+#if defined(__x86_64__)
+    snprintf(mut_out, cap,
+             "CR3 holds the PGD/PML4 physical base; one root maps both the user and kernel halves.");
+#elif defined(__aarch64__)
+    if (is_kernel != 0) {
+        snprintf(mut_out, cap,
+                 "TTBR1_EL1 holds the kernel (high-half) translation base; walked here for a kernel address.");
+    } else {
+        snprintf(mut_out, cap,
+                 "TTBR0_EL1 = user (low-half) translation base; TTBR1_EL1 holds the kernel (high-half) base.");
+    }
+#elif defined(__riscv)
+    int sv = 39;
+
+    if (res->paging_level == PAGING_LEVEL_5) {
+        sv = 57;
+    } else if (res->paging_level == PAGING_LEVEL_4) {
+        sv = 48;
+    }
+    snprintf(mut_out, cap,
+             "satp: MODE=Sv%d, root PPN=0x%llx (phys >> %u); one root for the whole address space.",
+             sv, (unsigned long long)(res->root_table_phys >> res->page_shift), res->page_shift);
+#endif /* defined(__x86_64__) */
+}
+
+/* Name of the root translation register actually used for this walk. */
+static const char *get_root_reg_name(int is_kernel)
+{
+#if defined(__aarch64__)
+    return (is_kernel != 0) ? "TTBR1_EL1" : "TTBR0_EL1";
+#else
+    return PW_ROOT_REG_NAME;
+#endif
+}
+
+/*
+ * Decode the flag bits of a present entry into a compact token list. The bit
+ * layout is hardware-defined and disjoint across arches (only the present/valid
+ * bit at bit 0 coincides), so this is the one decoder that must be per-arch.
+ * `is_huge_capable` marks the PUD/PMD levels (block-capable); `is_pte` marks the
+ * last level.
+ */
+#if defined(__x86_64__)
+
+static void decode_pte_flags(char *const mut_out, int cap, unsigned long long e,
+                             int is_huge_capable, int is_pte)
+{
+    int is_leaf = is_pte != 0 || (is_huge_capable != 0 && (e & PTE_PSE) != 0);
+    int p = 0;
+
+    mut_out[0] = '\0';
+    p = append_str(mut_out, p, cap, "P");
+    p = append_str(mut_out, p, cap, ((e & PTE_RW) != 0) ? " RW" : " RO");
+    p = append_str(mut_out, p, cap, ((e & PTE_USER) != 0) ? " U" : " S");
+
+    if ((e & PTE_ACCESSED) != 0) {
+        p = append_str(mut_out, p, cap, " A");
+    }
+    if (is_leaf != 0 && (e & PTE_DIRTY) != 0) {
+        p = append_str(mut_out, p, cap, " D");
+    }
+    if ((e & PTE_PWT) != 0) {
+        p = append_str(mut_out, p, cap, " PWT");
+    }
+    if ((e & PTE_PCD) != 0) {
+        p = append_str(mut_out, p, cap, " PCD");
+    }
+    if ((e & PTE_GLOBAL) != 0) {
+        p = append_str(mut_out, p, cap, " G");
+    }
+    if (is_huge_capable != 0 && (e & PTE_PSE) != 0) {
+        p = append_str(mut_out, p, cap, " PS");
+    }
+    if (is_pte != 0 && (e & PTE_PSE) != 0) {
+        p = append_str(mut_out, p, cap, " PAT");
+    }
+
+    p = append_str(mut_out, p, cap, ((e & PTE_NX) != 0) ? " NX" : " X");
+}
+
+#elif defined(__aarch64__)
+
+static void decode_pte_flags(char *const mut_out, int cap, unsigned long long e,
+                             int is_huge_capable, int is_pte)
+{
+    int p = 0;
+
+    mut_out[0] = '\0';
+    p = append_str(mut_out, p, cap, "V");
+
+    char ai[16];
+
+    if (is_pte == 0 && (e & A64_TABLE) != 0) {
+        unsigned apt = (unsigned)((e & A64_TABLE_AP_MASK) >> A64_TABLE_AP_SHIFT);
+
+        p = append_str(mut_out, p, cap, " TABLE");
+        if ((e & A64_TABLE_NS) != 0) {
+            p = append_str(mut_out, p, cap, " NSTable");
+        }
+        if (apt != 0) {
+            snprintf(ai, sizeof(ai), " APTable=%u", apt);
+            p = append_str(mut_out, p, cap, ai);
+        }
+        if ((e & A64_TABLE_UXN) != 0) {
+            p = append_str(mut_out, p, cap, " UXNTable");
+        }
+        if ((e & A64_TABLE_PXN) != 0) {
+            p = append_str(mut_out, p, cap, " PXNTable");
+        }
+        return;
+    }
+    p = append_str(mut_out, p, cap, ((e & A64_RDONLY) != 0) ? " RO" : " RW");
+    p = append_str(mut_out, p, cap, ((e & A64_USER) != 0) ? " U" : " S");
+    if ((e & A64_AF) != 0) {
+        p = append_str(mut_out, p, cap, " AF");
+    }
+    p = append_str(mut_out, p, cap, ((e & A64_NG) != 0) ? " nG" : " G");
+
+    unsigned sh = (unsigned)((e & A64_SH_MASK) >> A64_SH_SHIFT);
+    const char *shareability = " SH?";
+
+    if (sh == 3) {
+        shareability = " ISH";
+    } else if (sh == 2) {
+        shareability = " OSH";
+    } else if (sh == 0) {
+        shareability = " NSH";
+    }
+    p = append_str(mut_out, p, cap, shareability);
+    if ((e & A64_CONT) != 0) {
+        p = append_str(mut_out, p, cap, " Cont");
+    }
+    if ((e & A64_DBM) != 0) {
+        p = append_str(mut_out, p, cap, " DBM");
+    }
+    p = append_str(mut_out, p, cap, ((e & A64_PXN) != 0) ? " PXN" : " PX");
+    p = append_str(mut_out, p, cap, ((e & A64_UXN) != 0) ? " UXN" : " UX");
+    snprintf(ai, sizeof(ai), " AI=%u",
+             (unsigned)((e & A64_ATTRINDX_MASK) >> A64_ATTRINDX_SHIFT));
+    p = append_str(mut_out, p, cap, ai);
+    if (is_huge_capable != 0 && (e & A64_TABLE) == 0) {
+        p = append_str(mut_out, p, cap, " BLK");
+    }
+}
+
+#elif defined(__riscv)
+
+static void decode_pte_flags(char *const mut_out, int cap, unsigned long long e,
+                             int is_huge_capable, int is_pte)
+{
+    int p = 0;
+
+    mut_out[0] = '\0';
+    p = append_str(mut_out, p, cap, "V");
+    if ((e & RV_R) != 0) {
+        p = append_str(mut_out, p, cap, " R");
+    }
+    if ((e & RV_W) != 0) {
+        p = append_str(mut_out, p, cap, " W");
+    }
+    if ((e & RV_X) != 0) {
+        p = append_str(mut_out, p, cap, " X");
+    }
+    p = append_str(mut_out, p, cap, ((e & RV_U) != 0) ? " U" : " S");
+    if ((e & RV_G) != 0) {
+        p = append_str(mut_out, p, cap, " G");
+    }
+    if ((e & RV_A) != 0) {
+        p = append_str(mut_out, p, cap, " A");
+    }
+    if ((e & RV_D) != 0) {
+        p = append_str(mut_out, p, cap, " D");
+    }
+    /* No R/W/X set means this is a pointer to the next table, not a leaf. */
+    if ((e & (RV_R | RV_W | RV_X)) == 0) {
+        p = append_str(mut_out, p, cap, " (table)");
+    } else {
+        if ((e & RV_NAPOT) != 0) {
+            p = append_str(mut_out, p, cap, " NAPOT");
+        }
+
+        unsigned pbmt = (unsigned)((e & RV_PBMT_MASK) >> RV_PBMT_SHIFT);
+
+        if (pbmt != 0) {
+            const char *pbmt_name = " PBMT=?";
+
+            if (pbmt == 1) {
+                pbmt_name = " PBMT=NC";
+            } else if (pbmt == 2) {
+                pbmt_name = " PBMT=IO";
+            }
+            p = append_str(mut_out, p, cap, pbmt_name);
+        }
+    }
+}
+
+#endif /* defined(__x86_64__) */
+
+static void print_step(char *const mut_buf, int *const mut_offset, const char *const level_name,
+                       unsigned long long table_base, unsigned long long idx,
+                       unsigned long long entry_val, unsigned long long readback,
+                       int is_valid_entry, int is_huge_capable, int is_pte)
+{
+    unsigned long long entry_addr = table_base + (idx * 8);
+
+    *mut_offset += append_formatted(mut_buf + *mut_offset, BUFFER_SIZE - *mut_offset,
+                                    "[%s]\n", level_name);
+    *mut_offset += append_formatted(mut_buf + *mut_offset, BUFFER_SIZE - *mut_offset,
+                                    "  Table Base  : 0x%llx\n", table_base);
+    *mut_offset += append_formatted(mut_buf + *mut_offset, BUFFER_SIZE - *mut_offset,
+                                    "  Index       : 0x%llx (%llu)\n", idx, idx);
+    *mut_offset += append_formatted(mut_buf + *mut_offset, BUFFER_SIZE - *mut_offset,
+                                    "  Calculation : 0x%llx + (0x%llx * 8) = 0x%llx\n",
+                                    table_base, idx, entry_addr);
+    *mut_offset += append_formatted(mut_buf + *mut_offset, BUFFER_SIZE - *mut_offset,
+                                    "  Entry Value : 0x%llx\n", entry_val);
+
+    if (table_base != 0) {
+        if (readback == entry_val) {
+            *mut_offset += append_formatted(mut_buf + *mut_offset, BUFFER_SIZE - *mut_offset,
+                                            "  Verify      : *(0x%llx) == 0x%llx  [kernel read-back OK]\n",
+                                            entry_addr, entry_val);
+        } else {
+            *mut_offset += append_formatted(mut_buf + *mut_offset, BUFFER_SIZE - *mut_offset,
+                                            "  Verify      : *(0x%llx) read 0x%llx != entry 0x%llx  [MISMATCH]\n",
+                                            entry_addr, readback, entry_val);
+        }
+    }
+
+    if (is_valid_entry != 0) {
+        char flags[96];
+
+        decode_pte_flags(flags, sizeof(flags), entry_val, is_huge_capable, is_pte);
+        *mut_offset += append_formatted(mut_buf + *mut_offset, BUFFER_SIZE - *mut_offset,
+                                        "  Flags       : %s\n", flags);
+    }
+
+    const char *status = (is_valid_entry != 0) ? "Valid (Present)" : "Not Present / Empty";
+
+    *mut_offset += append_formatted(mut_buf + *mut_offset, BUFFER_SIZE - *mut_offset,
+                                    "  Status      : %s\n\n", status);
+}
 
 /*
  * Select the active levels for this paging depth. PGD/PMD/PTE are always
  * present; PUD appears at >= 4 levels, P4D only at 5. Returns the count and
- * fills levels[] top-to-bottom.
+ * fills mut_levels[] top-to-bottom.
  */
-static int select_levels(const struct pagewalker_result *res, struct level_info *levels)
+static int select_levels(struct level_info *const mut_levels,
+                         const struct pagewalker_result *const res)
 {
     const struct level_info all[5] = {
         { "PGD", "Page Global Directory", res->pgd_idx, res->pgd_base_phys,
@@ -352,102 +376,98 @@ static int select_levels(const struct pagewalker_result *res, struct level_info 
         { "PTE", "Page Table Entry", res->pte_idx, res->pte_base_phys,
           res->pte_val, res->pte_readback, 0, 1 },
     };
-    int use[5] = { 1, res->paging_level >= PAGING_LEVEL_5,
-                   res->paging_level >= PAGING_LEVEL_4, 1, 1 };
+    int is_used[5] = { 1, res->paging_level >= PAGING_LEVEL_5,
+                       res->paging_level >= PAGING_LEVEL_4, 1, 1 };
     int n = 0;
-    int i;
 
-    for (i = 0; i < 5; ++i) {
-        if (use[i]) {
-            levels[n++] = all[i];
+    for (int i = 0; i < 5; ++i) {
+        if (is_used[i] != 0) {
+            mut_levels[n] = all[i];
+            ++n;
         }
     }
     return n;
 }
 
 /* Center `s` within `width` columns; any odd surplus leans to the right. */
-static const char *center(char *out, size_t outsz, int width, const char *s)
+static const char *center(char *const mut_out, size_t outsz, int width, const char *const s)
 {
     int len = (int)strlen(s);
-    int left;
-    int right;
 
     if (len >= width || (size_t)width + 1 > outsz) {
-        snprintf(out, outsz, "%.*s", width, s);
-        return out;
+        snprintf(mut_out, outsz, "%.*s", width, s);
+        return mut_out;
     }
 
-    left = (width - len) / 2;
-    right = width - len - left;
+    int left = (width - len) / 2;
+    int right = width - len - left;
 
-    memset(out, ' ', (size_t)left);
-    memcpy(out + left, s, (size_t)len);
-    memset(out + left + len, ' ', (size_t)right);
-    out[width] = '\0';
-    return out;
+    memset(mut_out, ' ', (size_t)left);
+    memcpy(mut_out + left, s, (size_t)len);
+    memset(mut_out + left + len, ' ', (size_t)right);
+    mut_out[width] = '\0';
+    return mut_out;
 }
 
-/* Fill `out` with `n` copies of `c`, NUL-terminated. */
-static const char *fill(char *out, int n, char c)
+/* Fill `mut_out` with `n` copies of `c`, NUL-terminated. */
+static const char *fill(char *const mut_out, int n, char c)
 {
     int i;
 
     for (i = 0; i < n; ++i) {
-        out[i] = c;
+        mut_out[i] = c;
     }
 
-    out[i] = '\0';
-    return out;
+    mut_out[i] = '\0';
+    return mut_out;
 }
 
 /* Write the low `nbits` of `val` as '0'/'1' characters, MSB first. */
-static void bits_to_str(char *out, unsigned long long val, int nbits)
+static void convert_bits_to_str(char *const mut_out, unsigned long long val, int nbits)
 {
-    int i;
-
-    for (i = 0; i < nbits; ++i) {
-        out[i] = ((val >> (nbits - 1 - i)) & 1ULL) ? '1' : '0';
+    for (int i = 0; i < nbits; ++i) {
+        mut_out[i] = (((val >> (nbits - 1 - i)) & 1ULL) != 0) ? '1' : '0';
     }
 
-    out[nbits] = '\0';
+    mut_out[nbits] = '\0';
 }
 
 /* Emit a "+---+---+" rule sized to the label column and `col_widths[]`. */
-static int emit_sep(char *buf, int off, int labelw, const int *col_widths, int ncols)
+static int emit_sep(char *const mut_buf, int off, int labelw, const int *const col_widths,
+                    int ncols)
 {
     char dash[64];
-    int i;
 
-    off += snappend(buf + off, BUFFER_SIZE - off, "+%s+", fill(dash, labelw, '-'));
-    for (i = 0; i < ncols; ++i) {
-        off += snappend(buf + off, BUFFER_SIZE - off, "%s+", fill(dash, col_widths[i], '-'));
+    off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "+%s+", fill(dash, labelw, '-'));
+    for (int i = 0; i < ncols; ++i) {
+        off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "%s+",
+                                fill(dash, col_widths[i], '-'));
     }
 
-    off += snappend(buf + off, BUFFER_SIZE - off, "\n");
+    off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "\n");
     return off;
 }
 
 /* Emit one "| label | cell | cell |" row with every cell centered. */
-static int emit_row(char *buf, int off, const char *label, int labelw,
-                    const char **cells, const int *col_widths, int ncols)
+static int emit_row(char *const mut_buf, int off, const char *const label, int labelw,
+                    const char *const *const cells, const int *const col_widths, int ncols)
 {
     char tmp[64];
-    int i;
 
-    off += snappend(buf + off, BUFFER_SIZE - off, "|%s|",
-                    center(tmp, sizeof(tmp), labelw, label));
-    for (i = 0; i < ncols; ++i) {
-        off += snappend(buf + off, BUFFER_SIZE - off, "%s|",
-                        center(tmp, sizeof(tmp), col_widths[i], cells[i]));
+    off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "|%s|",
+                            center(tmp, sizeof(tmp), labelw, label));
+    for (int i = 0; i < ncols; ++i) {
+        off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "%s|",
+                                center(tmp, sizeof(tmp), col_widths[i], cells[i]));
     }
-    off += snappend(buf + off, BUFFER_SIZE - off, "\n");
+    off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "\n");
     return off;
 }
 
 /* Format a byte count as an exact binary-unit string (e.g. "2 MiB", "64 KiB"). */
-void human_size(char *out, size_t cap, unsigned long long bytes)
+void format_human_size(char *const mut_out, size_t cap, unsigned long long bytes)
 {
-    static const char *unit[] = { "B", "KiB", "MiB", "GiB", "TiB" };
+    static const char *s_unit[] = { "B", "KiB", "MiB", "GiB", "TiB" };
     unsigned long long v = bytes;
     int u = 0;
 
@@ -455,31 +475,34 @@ void human_size(char *out, size_t cap, unsigned long long bytes)
         v /= 1024;
         ++u;
     }
-    snprintf(out, cap, "%llu %s", v, unit[u]);
+    snprintf(mut_out, cap, "%llu %s", v, s_unit[u]);
 }
 
 /* Short name of the page-table level that held the final leaf entry. */
-const char *leaf_level_name(unsigned int lvl)
+const char *get_leaf_level_name(unsigned int lvl)
 {
     switch (lvl) {
-    case PW_LEAF_PTE: return "PTE";
-    case PW_LEAF_PMD: return "PMD";
-    case PW_LEAF_PUD: return "PUD";
-    case PW_LEAF_P4D: return "P4D";
-    default:          return "?";
+    case PW_LEAF_PTE:
+        return "PTE";
+    case PW_LEAF_PMD:
+        return "PMD";
+    case PW_LEAF_PUD:
+        return "PUD";
+    case PW_LEAF_P4D:
+        return "P4D";
+    default:
+        return "?";
     }
 }
 
-/* Render the full walk report into `buf` (BUFFER_SIZE bytes); returns length. */
-int build_report(char *buf, const struct pagewalker_result *res, unsigned int pid,
-                 int kernel_mode)
+/* Render the full walk report into `mut_buf` (BUFFER_SIZE bytes); returns length. */
+int build_report(char *const mut_buf, const struct pagewalker_result *const res, unsigned int pid,
+                 int is_kernel_mode)
 {
-    int offset = 0;
     struct level_info levels[5];
-    int level_count = select_levels(res, levels);
+    int level_count = select_levels(levels, res);
     int idx_bits = (int)res->page_shift - 3; /* 8-byte entries per table */
     int va_bits = (int)res->va_bits;
-    char rdesc[256];
 
     /*
      * For a standard (non-contiguous) huge mapping, the translation stops at a
@@ -491,9 +514,9 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
     int shown_levels = level_count;
     int offbits = (int)res->page_shift;
 
-    if (res->is_valid && !res->is_contiguous &&
-        res->mapping_level != PW_LEAF_PTE && res->mapping_level != PW_LEAF_NONE) {
-        const char *target = leaf_level_name(res->mapping_level);
+    if (res->is_valid != 0 && res->is_contiguous == 0 && res->mapping_level != PW_LEAF_PTE &&
+        res->mapping_level != PW_LEAF_NONE) {
+        const char *target = get_leaf_level_name(res->mapping_level);
         int li;
 
         for (li = 0; li < level_count; ++li) {
@@ -522,25 +545,27 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
         }
     }
 
+    int offset = 0;
+
     /* --- Report Header --- */
-    offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                       "\n=========================================================\n");
-    offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                       " %s Page Table Walk Report\n", PW_ARCH_NAME);
-    offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                       "=========================================================\n");
-    if (kernel_mode) {
-        offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                           " Target       : kernel address space\n");
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               "\n=========================================================\n");
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               " %s Page Table Walk Report\n", PW_ARCH_NAME);
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               "=========================================================\n");
+    if (is_kernel_mode != 0) {
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                                   " Target       : kernel address space\n");
     } else {
-        offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                           " Target PID   : %u\n", pid);
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                                   " Target PID   : %u\n", pid);
     }
-    offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                       " Target VAddr : 0x%016llx\n", res->target_vaddr);
-    offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                       " Paging Mode  : %d-Level Paging (VA %d-bit, page %u KiB)\n",
-                       res->paging_level, va_bits, (1u << res->page_shift) / 1024);
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               " Target VAddr : 0x%016llx\n", res->target_vaddr);
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               " Paging Mode  : %d-Level Paging (VA %d-bit, page %u KiB)\n",
+                               res->paging_level, va_bits, (1U << res->page_shift) / 1024);
 
     /*
      * --- Address field breakdown ---
@@ -550,17 +575,16 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
      */
     struct addr_field fields[9];
     int field_count = 0;
-    int shift_top = res->page_shift + (level_count - 1) * idx_bits;
-    int i;
+    int shift_top = (int)res->page_shift + ((level_count - 1) * idx_bits);
 
     snprintf(fields[field_count].bits, sizeof(fields[field_count].bits), "%d-%d", 63, va_bits);
     fields[field_count].name = "Extension";
-    fields[field_count].val = va_bits >= 64 ? 0 : (res->target_vaddr >> va_bits);
+    fields[field_count].val = (va_bits >= 64) ? 0 : (res->target_vaddr >> va_bits);
     fields[field_count].nbits = 64 - va_bits;
     ++field_count;
 
-    for (i = 0; i < shown_levels; ++i) {
-        int shift = res->page_shift + (level_count - 1 - i) * idx_bits;
+    for (int i = 0; i < shown_levels; ++i) {
+        int shift = (int)res->page_shift + ((level_count - 1 - i) * idx_bits);
         int nbits = (i == 0) ? (va_bits - shift_top) : idx_bits;
 
         snprintf(fields[field_count].bits, sizeof(fields[field_count].bits), "%d-%d",
@@ -580,9 +604,9 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
     char hexs[9][16];
     char raws[9][48];
 
-    for (i = 0; i < field_count; ++i) {
+    for (int i = 0; i < field_count; ++i) {
         snprintf(hexs[i], sizeof(hexs[i]), "0x%0*llx", (fields[i].nbits + 3) / 4, fields[i].val);
-        bits_to_str(raws[i], fields[i].val, fields[i].nbits);
+        convert_bits_to_str(raws[i], fields[i].val, fields[i].nbits);
     }
 
     /*
@@ -597,7 +621,7 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
     const char *bincells[9];
     int labelw = (int)strlen("Bits") + 2;
 
-    for (i = 0; i < field_count; ++i) {
+    for (int i = 0; i < field_count; ++i) {
         int w = (int)strlen(fields[i].bits);
 
         if ((int)strlen(fields[i].name) > w) {
@@ -617,14 +641,14 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
         bincells[i] = raws[i];
     }
 
-    offset = emit_sep(buf, offset, labelw, col_widths, field_count);
-    offset = emit_row(buf, offset, "Bits", labelw, bitscells, col_widths, field_count);
-    offset = emit_sep(buf, offset, labelw, col_widths, field_count);
-    offset = emit_row(buf, offset, "IDX", labelw, namecells, col_widths, field_count);
-    offset = emit_row(buf, offset, "VAL", labelw, hexcells, col_widths, field_count);
-    offset = emit_row(buf, offset, "BIN", labelw, bincells, col_widths, field_count);
-    offset = emit_sep(buf, offset, labelw, col_widths, field_count);
-    offset += snappend(buf + offset, BUFFER_SIZE - offset, "\n");
+    offset = emit_sep(mut_buf, offset, labelw, col_widths, field_count);
+    offset = emit_row(mut_buf, offset, "Bits", labelw, bitscells, col_widths, field_count);
+    offset = emit_sep(mut_buf, offset, labelw, col_widths, field_count);
+    offset = emit_row(mut_buf, offset, "IDX", labelw, namecells, col_widths, field_count);
+    offset = emit_row(mut_buf, offset, "VAL", labelw, hexcells, col_widths, field_count);
+    offset = emit_row(mut_buf, offset, "BIN", labelw, bincells, col_widths, field_count);
+    offset = emit_sep(mut_buf, offset, labelw, col_widths, field_count);
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "\n");
 
     /*
      * Full 64-bit address, split on the page-table field boundaries. Each binary
@@ -635,88 +659,92 @@ int build_report(char *buf, const struct pagewalker_result *res, unsigned int pi
     int binstart[9];
     int acc = 1 + labelw + 1; /* column where the first cell's content begins */
 
-    for (i = 0; i < field_count; ++i) {
+    for (int i = 0; i < field_count; ++i) {
         int leftpad = (col_widths[i] - (int)strlen(raws[i])) / 2;
 
         binstart[i] = acc + leftpad;
         acc += col_widths[i] + 1;
     }
 
-    offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                       " Target VAddr (64-bit, MSB -> LSB): 0x%016llx\n", res->target_vaddr);
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               " Target VAddr (64-bit, MSB -> LSB): 0x%016llx\n",
+                               res->target_vaddr);
 
     char sp[96];
     int cur = binstart[0] - 3; /* leave room for "-> " just before the first group */
 
-    offset += snappend(buf + offset, BUFFER_SIZE - offset, "%s-> ", fill(sp, cur, ' '));
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "%s-> ", fill(sp, cur, ' '));
     cur += 3;
-    for (i = 0; i < field_count; ++i) {
+    for (int i = 0; i < field_count; ++i) {
         if (binstart[i] > cur) {
-            offset += snappend(buf + offset, BUFFER_SIZE - offset, "%s",
-                               fill(sp, binstart[i] - cur, ' '));
+            offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "%s",
+                                       fill(sp, binstart[i] - cur, ' '));
             cur = binstart[i];
         }
-        offset += snappend(buf + offset, BUFFER_SIZE - offset, "%s", raws[i]);
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "%s", raws[i]);
         cur += (int)strlen(raws[i]);
     }
-    offset += snappend(buf + offset, BUFFER_SIZE - offset, "\n\n");
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "\n\n");
 
     /* --- Detailed Steps --- */
-    offset += snappend(buf + offset, BUFFER_SIZE - offset, "=== Translation Steps ===\n\n");
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               "=== Translation Steps ===\n\n");
 
     /* Step 0: the arch root translation register. */
-    describe_root_reg(rdesc, sizeof(rdesc), res, kernel_mode);
-    offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                       "[Step 0: %s Register]\n", root_reg_name(kernel_mode));
-    offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                       "  Physical Addr : 0x%llx\n", res->root_table_phys);
-    offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                       "  Description   : %s\n\n", rdesc);
+    char rdesc[256];
+
+    describe_root_reg(rdesc, sizeof(rdesc), res, is_kernel_mode);
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               "[Step 0: %s Register]\n", get_root_reg_name(is_kernel_mode));
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               "  Physical Addr : 0x%llx\n", res->root_table_phys);
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               "  Description   : %s\n\n", rdesc);
 
     /* Steps 1..N: one per walked level (down to the leaf for a huge page). */
-    for (i = 0; i < shown_levels; ++i) {
+    for (int i = 0; i < shown_levels; ++i) {
         char step_name[64];
 
         snprintf(step_name, sizeof(step_name), "Step %d: %s (%s)",
                  i + 1, levels[i].name, levels[i].long_name);
-        print_step(buf, &offset, step_name,
+        print_step(mut_buf, &offset, step_name,
                    levels[i].base_phys, levels[i].idx, levels[i].val,
                    levels[i].readback, (int)(levels[i].val & 1),
-                   levels[i].huge_capable, levels[i].is_pte);
+                   levels[i].is_huge_capable, levels[i].is_pte);
     }
 
     /* --- Final Verification --- */
-    offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                       "--------------------------------------------------------\n");
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               "--------------------------------------------------------\n");
 
-    if (res->is_valid) {
+    if (res->is_valid != 0) {
         char szs[32];
 
-        human_size(szs, sizeof(szs), res->page_size);
-        offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                           "[FINAL RESULT]\n");
-        offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                           "  Mapped Page    : %s  (leaf at %s%s%s)\n", szs,
-                           leaf_level_name(res->mapping_level),
-                           res->is_contiguous ? ", " : "",
-                           res->is_contiguous ? PW_CONT_TERM : "");
-        offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                           "  Page Base Phys : 0x%llx\n", res->page_base_phys);
-        offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                           "  Offset         : 0x%llx\n", res->page_offset);
-        offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                           "  Final Phys Addr: 0x%llx\n\n", res->final_phys_addr);
-        offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                           "[VERIFICATION]\n");
-        offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                           "  Content at Phys: 0x%016llx  (u64, little-endian; bytes appear reversed in a dump)\n",
-                           res->value_at_phys);
+        format_human_size(szs, sizeof(szs), res->page_size);
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                                   "[FINAL RESULT]\n");
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                                   "  Mapped Page    : %s  (leaf at %s%s%s)\n", szs,
+                                   get_leaf_level_name(res->mapping_level),
+                                   (res->is_contiguous != 0) ? ", " : "",
+                                   (res->is_contiguous != 0) ? PW_CONT_TERM : "");
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                                   "  Page Base Phys : 0x%llx\n", res->page_base_phys);
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                                   "  Offset         : 0x%llx\n", res->page_offset);
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                                   "  Final Phys Addr: 0x%llx\n\n", res->final_phys_addr);
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                                   "[VERIFICATION]\n");
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                                   "  Content at Phys: 0x%016llx  (u64, little-endian; bytes appear reversed in a dump)\n",
+                                   res->value_at_phys);
     } else {
-        offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                           "[FINAL RESULT]\n  Translation Stopped (Page Fault / Not Mapped / Swapped Out)\n");
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                                   "[FINAL RESULT]\n  Translation Stopped (Page Fault / Not Mapped / Swapped Out)\n");
     }
-    offset += snappend(buf + offset, BUFFER_SIZE - offset,
-                       "--------------------------------------------------------\n");
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
+                               "--------------------------------------------------------\n");
 
     return offset;
 }
