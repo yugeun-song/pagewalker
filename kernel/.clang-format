@@ -29,4 +29,10 @@ IncludeCategories:
       SortPriority: 1
     - Regex: '^"'
       Priority: 3
+ForEachMacros:
+    - for_each_possible_cpu
+    - list_for_each
+    - list_for_each_entry
+    - list_for_each_entry_safe
+SpaceBeforeParens: ControlStatementsExceptControlMacros
 InsertNewlineAtEOF: true
