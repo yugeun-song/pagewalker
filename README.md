@@ -198,7 +198,9 @@ the same file as in linux-kernel-samples, fits it to clangd:
 
 Once written, both databases are rewritten by every build whose flags changed,
 so an editor never reads stale flags. Both are git-ignored. The kernel database
-needs `python3` and `clang`.
+needs `python3` and `clang`. `.clangd` turns off clangd's unused-include check,
+which reads kernel symbols and glibc's `getopt_long()` as coming from the
+internal headers that define them and calls the public headers unused.
 
 ## Build
 
@@ -214,7 +216,9 @@ make help       # the goals, the variables and the programs
 
 Debug builds of the CLI keep `-O0`, full debug information, `-pg`, no default
 hardening, no PIE and `-rdynamic`; the sanitize build adds `-fsanitize=address`
-(or `SANITIZE=<list>`) and leaves out the static self-test. The module's
+(or `SANITIZE=<list>`) and leaves out the static self-test. The CLI builds with
+`-Wno-unused-parameter`: the report helpers share one signature across the three
+architectures, and each reads only the parameters its hardware needs. The module's
 profiles come from `kernel/profile.mk`, the same file as linux-kernel-samples'
 `scripts/profile.mk`: release keeps the kernel's flags and splits the debug
 information into `pagewalker.ko.debug`; debug adds `-DDEBUG -g3`, no inlining,

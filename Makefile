@@ -1,4 +1,5 @@
 STD := c99
+WARNINGS_EXTRA := -Wno-unused-parameter
 PROGRAMS := pagewalkerctl selftest
 pagewalkerctl_SRCS := user/pagewalkerctl.c user/report.c user/dump.c user/symbols.c user/read.c
 selftest_SRCS := user/selftest.c
