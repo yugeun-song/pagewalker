@@ -25,11 +25,16 @@ ifeq ($(CROSS_COMPILE)$(LLVM),)
 CROSS_COMPILE := $(call kinfo,cross)
 LLVM := $(call kinfo,llvm)
 endif
+ifeq ($(call kinfo,symvers)$(KBUILD_MODPOST_WARN),none)
+$(error $(KDIR) has no Module.symvers or vmlinux.symvers, so the module cannot be checked against it; \
+	build vmlinux in it first, or pass KBUILD_MODPOST_WARN=1 to compile anyway)
+endif
+EXTRA_SYMBOLS = $(if $(filter vmlinux,$(call kinfo,symvers)),KBUILD_EXTRA_SYMBOLS='$(KDIR)/vmlinux.symvers')
 KCC = $(or $(call kinfo,cc),$(if $(LLVM),$(filter %/,$(LLVM))clang$(filter -%,$(LLVM)),$(CROSS_COMPILE)gcc))
 MODULE_TOOLCHAIN = $(if $(ARCH),ARCH='$(ARCH)') $(if $(CROSS_COMPILE),CROSS_COMPILE='$(CROSS_COMPILE)') \
 	$(if $(LLVM),LLVM='$(LLVM)') CC='$(KCC)'
 KTARGET = $(KDIR) (ARCH=$(ARCH)$(if $(CROSS_COMPILE), CROSS_COMPILE=$(CROSS_COMPILE))$(if $(LLVM), LLVM=$(LLVM)))
-KMAKE = $(MAKE) -C kernel KDIR='$(KDIR)' $(MODULE_TOOLCHAIN)
+KMAKE = $(MAKE) -C kernel KDIR='$(KDIR)' $(MODULE_TOOLCHAIN) $(EXTRA_SYMBOLS)
 KCOMPDB = $(MAKE) -C '$(KDIR)' M='$(CURDIR)/kernel' $(MODULE_TOOLCHAIN) PROFILE='$(PROFILE)' \
 	$(if $(filter debug,$(PROFILE)),W=1) compile_commands.json > /dev/null && \
 	python3 kernel/clang-compdb.py --db kernel/compile_commands.json --kdir '$(KDIR)' --profile '$(PROFILE)' \
