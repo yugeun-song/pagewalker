@@ -79,7 +79,7 @@ def tracked(root, patterns):
     return found
 
 
-def alias_of(tree, dirs):
+def symlink_of(tree, dirs):
     for link in sorted(p for d in dirs for p in glob.glob(os.path.join(os.path.expanduser(d), "*"))):
         if os.path.islink(link) and os.path.realpath(link) == tree:
             return link
@@ -95,7 +95,7 @@ def main():
     ap.add_argument("--headers", action="store_true",
                     help="add every repository header with the command of a unit that includes it")
     ap.add_argument("--cscope", help="write the repository sources and the kernel headers they include here")
-    ap.add_argument("--link-dirs", default="", help="directories whose links may replace the kernel path")
+    ap.add_argument("--symlink-dirs", default="", help="directories whose symlinks may replace the kernel path")
     ap.add_argument("--map", action="append", default=[], help="OLD=NEW path to rewrite")
     ap.add_argument("--previous", help="the database this one replaces; report only when they differ")
     opts = ap.parse_args()
@@ -132,7 +132,7 @@ def main():
             added += 1
 
     replace = [m.split("=", 1) for m in opts.map]
-    link = alias_of(kdir, opts.link_dirs.split())
+    link = symlink_of(kdir, opts.symlink_dirs.split())
     if link:
         replace.append([kdir, link])
     headers = sorted({d for found in deps.values() for d in found if not d.startswith(root + os.sep)})

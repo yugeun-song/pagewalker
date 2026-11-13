@@ -152,7 +152,8 @@ pagewalker/
 │   ├── walk.c, walk.h            #   page-table walk + bulk read (command 2)
 │   ├── arch.h                    #   per-arch inline layer (root register, level fold)
 │   ├── profile.mk                #   debug / release compiler flags for Kbuild
-│   └── clang-compdb.py           #   makes the kbuild compile database fit clangd
+│   ├── clang-compdb.py           #   makes the kbuild compilation database fit clangd
+│   └── check-kernel-tree.py      #   reads the architecture and toolchain of KDIR
 ├── user/                         # CLI -> pagewalkerctl
 │   ├── pagewalkerctl.c           #   argument handling + dispatch
 │   ├── pagewalkerctl.h           #   CLI umbrella header (includes, out_fmt)
@@ -173,7 +174,7 @@ self-test build into `bin/<arch>-linux-<cc>-<mode>/`, with their objects under
 Source indexes are built on demand and are not part of the default build:
 `make index` writes `tags` (ctags), `cscope.out` and two `compile_commands.json`,
 one for `kernel/` and one at the root for `user/` written by `build.mk`, both
-with the `PROFILE` flags, so `clangd` resolves symbols as an LSP in parallel
+with the `PROFILE` flags, so `clangd` resolves symbols as a language server in parallel
 with ctags/cscope; `make clean-index` removes them. Kbuild writes the kernel
 database (`make M=kernel compile_commands.json`), and `kernel/clang-compdb.py`,
 the same file as in linux-kernel-samples, fits it to clangd:
@@ -183,7 +184,7 @@ the same file as in linux-kernel-samples, fits it to clangd:
 - it gives `arch.h`, `walk.h` and `pagewalker_common.h` the command of a source
   that includes them, so a header opened alone sees the kernel's `CONFIG_*`;
 - it writes kernel paths through `/usr/src/linux` when that link names the
-  tree, so the database survives a kernel upgrade (`KALIAS_DIRS=` lists other
+  tree, so the database survives a kernel upgrade (`KDIR_SYMLINK_DIRS=` lists other
   directories to look in).
 
 Once written, both databases are rewritten by every build whose flags changed,
@@ -202,7 +203,7 @@ make clean      # build products (distclean: also the index and tool outputs)
 make help       # the goals, the variables and the programs
 ```
 
-Debug builds of the CLI keep `-O0`, full debug information, `-pg`, no injected
+Debug builds of the CLI keep `-O0`, full debug information, `-pg`, no default
 hardening, no PIE and `-rdynamic`; the sanitize build adds `-fsanitize=address`
 (or `SANITIZE=<list>`) and leaves out the static self-test. The module's
 profiles come from `kernel/profile.mk`, the same file as linux-kernel-samples'
@@ -213,7 +214,7 @@ pattern-initialized stack variables, the per-module sanitizer switches and `W=1`
 When the running kernel has no build tree, the newest one under `/lib/modules` is
 used; `KDIR=` picks another.
 
-The module builds for the architecture `KDIR` was built for. `kernel/ktree.py`,
+The module builds for the architecture `KDIR` was built for. `kernel/check-kernel-tree.py`,
 the same file as in linux-kernel-samples, reads the tree's architecture and
 toolchain, so a tree built for another architecture needs no other option;
 `ARCH=`, `CROSS_COMPILE=` and `LLVM=` override what it finds:

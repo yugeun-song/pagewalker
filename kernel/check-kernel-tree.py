@@ -59,15 +59,15 @@ def settings(text):
     return {k: v.strip('"') for k, v in re.findall(r"^(CONFIG_\w+)=(.*)$", text or "", re.M)}
 
 
-def kernelversion(tree, src, baseline):
+def kernelversion(tree, src, minimum):
     head = read(os.path.join(src, "Makefile"), 4096) or ""
     keys = dict(re.findall(r"^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION) =[ \t]*(\S*)[ \t]*$", head, re.M))
     nums = [keys.get(k, "") for k in ("VERSION", "PATCHLEVEL", "SUBLEVEL")]
     if not all(n.isdigit() for n in nums):
         fail(tree, "its Makefile does not define the kernel's VERSION, PATCHLEVEL and SUBLEVEL")
     found = "%s.%s.%s%s" % (*nums, keys.get("EXTRAVERSION", ""))
-    if (int(nums[0]), int(nums[1])) < baseline:
-        fail(tree, "kernel %s is older than the %d.%d baseline" % ((found,) + baseline))
+    if (int(nums[0]), int(nums[1])) < minimum:
+        fail(tree, "kernel %s is older than the minimum version %d.%d" % ((found,) + minimum))
     return found
 
 
@@ -194,7 +194,7 @@ def check(opts):
     if not os.path.isdir(tree):
         fail(tree, "no such directory")
     src = os.path.join(tree, "source") if os.path.isdir(os.path.join(tree, "source")) else tree
-    found = kernelversion(tree, src, tuple(map(int, opts.baseline.split("."))))
+    found = kernelversion(tree, src, tuple(map(int, opts.min_version.split("."))))
     if not all(os.path.isfile(os.path.join(src, "scripts", f)) for f in ("Kbuild.include", "Makefile.build")):
         fail(tree, "it lacks kbuild (scripts/Kbuild.include, scripts/Makefile.build)")
     if os.path.exists(os.path.join(tree, "include/config/kernel.release")):
@@ -247,7 +247,7 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check")
-    c.add_argument("--baseline", required=True)
+    c.add_argument("--min-version", required=True)
     for flag in ("--arch", "--cross", "--llvm", "--cc", "--release", "--elf"):
         c.add_argument(flag, default="")
     c.add_argument("tree")

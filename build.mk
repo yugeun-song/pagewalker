@@ -7,8 +7,8 @@ endif
 PROFILE ?= debug
 SANITIZE ?= address
 STD ?= c99
-BIN_ROOT ?= bin
-BUILD_ROOT ?= build
+BIN_DIR ?= bin
+BUILD_DIR ?= build
 CTAGS ?= ctags
 CSCOPE ?= cscope
 CLANG_FORMAT ?= clang-format
@@ -40,12 +40,12 @@ ifneq ($(word 2,$(MAKECMDGOALS)),)
 
 MK_SEQUENTIAL := 1
 
-.PHONY: $(MAKECMDGOALS) mk-run-goals
+.PHONY: $(MAKECMDGOALS) run-goals-in-order
 
-$(MAKECMDGOALS): mk-run-goals
+$(MAKECMDGOALS): run-goals-in-order
 	@:
 
-mk-run-goals:
+run-goals-in-order:
 	@set -e; for goal in $(MAKECMDGOALS); do $(MAKE) --no-print-directory $$goal; done
 
 else
@@ -85,9 +85,9 @@ $(error CC=$(CC) targets $(MK_TRIPLE), but this project builds for Linux only)
 endif
 MK_ARCH := $(firstword $(subst -, ,$(MK_TRIPLE)))
 MK_FAMILY := $(if $(filter 1,$(shell printf '__clang__\n' | $(CC) -E -P -x c - 2> /dev/null)),clang,gcc)
-TAG := $(MK_ARCH)-linux-$(MK_FAMILY)
+MK_TARGET := $(MK_ARCH)-linux-$(MK_FAMILY)
 MK_CC_PATH := $(shell command -v $(firstword $(CC)) 2> /dev/null)
-MK_PROBE := $(BUILD_ROOT)/probe/$(TAG)-$(shell printf '%s' '$(CC)' | md5sum | cut -c1-8).mk
+MK_PROBE := $(BUILD_DIR)/probe/$(MK_TARGET)-$(shell printf '%s' '$(CC)' | md5sum | cut -c1-8).mk
 
 MK_DEBUG_CFLAGS := -O0 -ggdb3 -fdebug-macro -fno-builtin -fno-inline -fno-omit-frame-pointer \
 	-mno-omit-leaf-frame-pointer -fno-optimize-sibling-calls -fasynchronous-unwind-tables \
@@ -123,8 +123,8 @@ $(MK_PROBE): $(MK_FILE) $(MK_CC_PATH)
 	    exit 1; \
 	fi
 	@printf 'MK_PROBED_CC := %s\n' '$(CC)' > $@.tmp
-	@echo "=> target: $(TAG), $(CC) $$($(CC) -dumpfullversion 2> /dev/null || $(CC) -dumpversion)"; \
-	echo "=> every mode: $(strip $(MK_COMMON_CFLAGS))"; \
+	@echo "=> target: $(MK_TARGET), $(CC) $$($(CC) -dumpfullversion 2> /dev/null || $(CC) -dumpversion)"; \
+	echo "=> common flags: $(strip $(MK_COMMON_CFLAGS))"; \
 	$(call mk_probe_compile,MK_DEBUG_CFLAGS_OK,debug,$(MK_DEBUG_CFLAGS)); \
 	$(call mk_probe_link,MK_DEBUG_LDFLAGS_OK,debug link,$(MK_DEBUG_LDFLAGS),-fno-pie); \
 	$(call mk_probe_compile,MK_RELEASE_CFLAGS_OK,release,$(MK_RELEASE_CFLAGS)); \
@@ -132,9 +132,9 @@ $(MK_PROBE): $(MK_FILE) $(MK_CC_PATH)
 	if printf 'int main(void) { return 0; }\n' | $(CC) -O2 $(MK_LTO_$(MK_FAMILY)) -x c - \
 	    -o $(@D)/probe.out > /dev/null 2>&1; then \
 	    printf 'MK_LTO_OK := %s\n' '$(MK_LTO_$(MK_FAMILY))' >> $@.tmp; \
-	    echo "=> release LTO: $(MK_LTO_$(MK_FAMILY))"; \
+	    echo "=> release link-time optimization (LTO): $(MK_LTO_$(MK_FAMILY))"; \
 	else \
-	    echo "=> release LTO dropped: $(MK_LTO_$(MK_FAMILY))"; \
+	    echo "=> release link-time optimization (LTO) dropped: $(MK_LTO_$(MK_FAMILY))"; \
 	fi; \
 	rm -f $(@D)/probe.o $(@D)/probe.out
 	@mv $@.tmp $@
@@ -156,8 +156,8 @@ MK_CFLAGS_release = $(MK_RELEASE_CFLAGS_OK) $(MK_LTO_OK)
 MK_LDFLAGS_release = $(MK_RELEASE_LDFLAGS_OK) $(MK_LTO_OK)
 
 mk_srcs = $(or $($(1)_SRCS),$(1).c)
-mk_objs = $(addprefix $(BUILD_ROOT)/$(TAG)-$(1)/,$(patsubst %.c,%.o,$(2)))
-mk_bin = $(BIN_ROOT)/$(TAG)-$(1)/$(2)
+mk_objs = $(addprefix $(BUILD_DIR)/$(MK_TARGET)-$(1)/,$(patsubst %.c,%.o,$(2)))
+mk_bin = $(BIN_DIR)/$(MK_TARGET)-$(1)/$(2)
 mk_ldflags = $(if $($(2)_STATIC),$(filter-out $(MK_STATIC_DROP_$(1)),$(MK_LDFLAGS_$(1))) -static,$(MK_LDFLAGS_$(1)))
 
 MK_PROGRAMS_debug := $(PROGRAMS)
@@ -167,7 +167,7 @@ MK_PROGRAMS_static := $(strip $(foreach p,$(PROGRAMS),$(if $($(p)_STATIC),$(p)))
 MK_MODES := debug sanitize release
 
 define mk_mode_rules
-$(BUILD_ROOT)/$(TAG)-$(1)/%.o: %.c $(MK_PROJECT) $(MK_FILE) $(MK_PROBE)
+$(BUILD_DIR)/$(MK_TARGET)-$(1)/%.o: %.c $(MK_PROJECT) $(MK_FILE) $(MK_PROBE)
 	@mkdir -p $$(@D)
 	$$(CC) $$(MK_COMMON_CFLAGS) $$(MK_CFLAGS_$(1)) -MMD -MP $$(CFLAGS) -c $$< -o $$@
 endef
@@ -191,13 +191,13 @@ all: $(MK_ALL_$(PROFILE)) $(EXTRA_ALL)
 	@$(mk_refresh_compdb)
 
 debug: $(foreach p,$(MK_PROGRAMS_debug),$(call mk_bin,debug,$(p))) $(EXTRA_DEBUG)
-	@echo "=> debug: $(call mk_count,$(MK_PROGRAMS_debug),program,programs) in $(BIN_ROOT)/$(TAG)-debug/"
+	@echo "=> debug: $(call mk_count,$(MK_PROGRAMS_debug),program,programs) in $(BIN_DIR)/$(MK_TARGET)-debug/"
 	@$(if $(filter debug,$(MK_GOALS)),$(mk_refresh_compdb))
 
 ifeq ($(MK_SANITIZE_OK),yes)
 sanitize: $(foreach p,$(MK_PROGRAMS_sanitize),$(call mk_bin,sanitize,$(p)))
 	@echo "=> sanitize ($(SANITIZE)): $(call mk_count,$(MK_PROGRAMS_sanitize),program,programs) in\
-	 $(BIN_ROOT)/$(TAG)-sanitize/$(if $(MK_PROGRAMS_static),; static$(comma) so not sanitized: $(MK_PROGRAMS_static))"
+	 $(BIN_DIR)/$(MK_TARGET)-sanitize/$(if $(MK_PROGRAMS_static),; static$(comma) so not sanitized: $(MK_PROGRAMS_static))"
 	@$(if $(filter sanitize,$(MK_GOALS)),$(mk_refresh_compdb))
 else
 sanitize:
@@ -205,7 +205,7 @@ sanitize:
 endif
 
 release: $(foreach p,$(MK_PROGRAMS_release),$(call mk_bin,release,$(p))) $(EXTRA_RELEASE)
-	@echo "=> release: $(call mk_count,$(MK_PROGRAMS_release),program,programs) in $(BIN_ROOT)/$(TAG)-release/"
+	@echo "=> release: $(call mk_count,$(MK_PROGRAMS_release),program,programs) in $(BIN_DIR)/$(MK_TARGET)-release/"
 	@$(if $(filter release,$(MK_GOALS)),$(mk_refresh_compdb))
 
 MK_COMPDB_SRCS := $(sort $(LIB_SRCS) $(foreach p,$(PROGRAMS),$(call mk_srcs,$(p))))
@@ -279,8 +279,8 @@ clean-index: $(EXTRA_CLEAN_INDEX)
 	@echo "=> clean-index: removed compile_commands.json, tags and cscope.*"
 
 clean: $(EXTRA_CLEAN)
-	@rm -rf $(BIN_ROOT) $(BUILD_ROOT)
-	@echo "=> clean: removed $(BIN_ROOT)/ and $(BUILD_ROOT)/"
+	@rm -rf $(BIN_DIR) $(BUILD_DIR)
+	@echo "=> clean: removed $(BIN_DIR)/ and $(BUILD_DIR)/"
 
 distclean: clean clean-index $(EXTRA_DISTCLEAN)
 	@rm -rf $(MK_TOOL_OUTPUTS) $(MK_CACHES)
@@ -300,9 +300,9 @@ help:
 	    '' \
 	    'goals:' \
 	    '  all           the debug and sanitize builds, or the release build with PROFILE=release' \
-	    '  debug         -O0, full debug info, -pg, no injected hardening, no PIE' \
+	    '  debug         -O0, full debug info, -pg, no default hardening, no PIE' \
 	    '  sanitize      the debug flags plus -fsanitize=SANITIZE' \
-	    '  release       -O2, hardened, PIE, LTO' \
+	    '  release       -O2, hardened, PIE, link-time optimization (LTO)' \
 	    '  index         compile_commands.json with the PROFILE flags, tags and cscope.out' \
 	    '  compdb        compile_commands.json only (tags and cscope make the other two)' \
 	    '  clean-index   remove compile_commands.json, tags and cscope.*' \
