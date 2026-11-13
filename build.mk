@@ -31,7 +31,7 @@ endif
 %: %.o
 
 MK_STANDARD_GOALS := all debug sanitize release index compdb tags cscope clean-index clean distclean \
-	unused format format-check help
+	unused format format-check list help
 MK_GOALS := $(or $(MAKECMDGOALS),all)
 MK_ALL_debug := debug sanitize
 MK_ALL_release := release
@@ -62,6 +62,8 @@ define newline
 endef
 
 mk_count = $(words $(1)) $(if $(filter 1,$(words $(1))),$(2),$(3))
+MK_HELP_LIST := 10
+MK_HELP_MORE = $(wordlist 11,$(words $(PROGRAMS)),$(PROGRAMS))
 
 MK_INDEX_SRCS := $(or $(INDEX_SRCS),$(shell git ls-files -- '*.c' '*.h' 2> /dev/null))
 MK_FORMAT_SRCS := $(or $(FORMAT_SRCS),$(MK_INDEX_SRCS))
@@ -72,7 +74,7 @@ MK_TOOL_OUTPUTS := gmon.out perf.data perf.data.old uftrace.data uftrace.data.ol
 	drd.out.[0-9]*
 MK_CACHES := .cache
 
-ifneq ($(filter-out clean clean-index distclean format format-check help tags cscope,$(MK_GOALS)),)
+ifneq ($(filter-out clean clean-index distclean format format-check list help tags cscope,$(MK_GOALS)),)
 
 MK_TRIPLE := $(shell $(CC) -dumpmachine 2> /dev/null)
 ifeq ($(MK_TRIPLE),)
@@ -186,14 +188,17 @@ MK_ALL_OBJS := $(sort $(foreach m,$(MK_MODES),$(call mk_objs,$(m),$(LIB_SRCS)) \
 -include $(MK_ALL_OBJS:.o=.d)
 
 all: $(MK_ALL_$(PROFILE)) $(EXTRA_ALL)
+	@$(mk_refresh_compdb)
 
 debug: $(foreach p,$(MK_PROGRAMS_debug),$(call mk_bin,debug,$(p))) $(EXTRA_DEBUG)
 	@echo "=> debug: $(call mk_count,$(MK_PROGRAMS_debug),program,programs) in $(BIN_ROOT)/$(TAG)-debug/"
+	@$(if $(filter debug,$(MK_GOALS)),$(mk_refresh_compdb))
 
 ifeq ($(MK_SANITIZE_OK),yes)
 sanitize: $(foreach p,$(MK_PROGRAMS_sanitize),$(call mk_bin,sanitize,$(p)))
 	@echo "=> sanitize ($(SANITIZE)): $(call mk_count,$(MK_PROGRAMS_sanitize),program,programs) in\
 	 $(BIN_ROOT)/$(TAG)-sanitize/$(if $(MK_PROGRAMS_static),; static$(comma) so not sanitized: $(MK_PROGRAMS_static))"
+	@$(if $(filter sanitize,$(MK_GOALS)),$(mk_refresh_compdb))
 else
 sanitize:
 	@echo "=> sanitize ($(SANITIZE)): skipped, $(CC) cannot link -fsanitize=$(SANITIZE)"
@@ -201,6 +206,7 @@ endif
 
 release: $(foreach p,$(MK_PROGRAMS_release),$(call mk_bin,release,$(p))) $(EXTRA_RELEASE)
 	@echo "=> release: $(call mk_count,$(MK_PROGRAMS_release),program,programs) in $(BIN_ROOT)/$(TAG)-release/"
+	@$(if $(filter release,$(MK_GOALS)),$(mk_refresh_compdb))
 
 MK_COMPDB_SRCS := $(sort $(LIB_SRCS) $(foreach p,$(PROGRAMS),$(call mk_srcs,$(p))))
 mk_json_list = $(subst $(space),$(comma)$(space),$(strip $(foreach a,$(1),"$(a)")))
@@ -209,10 +215,19 @@ mk_compdb_entry = {"directory": "$(CURDIR)", "file": "$(CURDIR)/$(1)", "argument
 
 compdb: compile_commands.json $(EXTRA_COMPDB)
 
+define mk_write_compdb
+$(file >compile_commands.json.tmp,[$(newline)$(subst }$(space){,}$(comma)$(newline){,$(foreach s,$(MK_COMPDB_SRCS),$(call mk_compdb_entry,$(s))))$(newline)])
+endef
+
+mk_compdb_state = if cmp -s compile_commands.json.tmp compile_commands.json; then rm -f compile_commands.json.tmp; \
+	state=unchanged; else mv compile_commands.json.tmp compile_commands.json; state=written; fi
+mk_compdb_report = echo "=> compile_commands.json: $(call mk_count,$(MK_COMPDB_SRCS),entry,entries) with the $(PROFILE) flags, $$state"
+mk_refresh_compdb = $(if $(wildcard compile_commands.json),$(mk_write_compdb)$(mk_compdb_state); \
+	[ $$state = unchanged ] || $(mk_compdb_report),:)
+
 compile_commands.json: $(MK_PROBE) FORCE
-	@$(file >$@.tmp,[$(newline)$(subst }$(space){,}$(comma)$(newline){,$(foreach s,$(MK_COMPDB_SRCS),$(call mk_compdb_entry,$(s))))$(newline)])
-	@if cmp -s $@.tmp $@; then rm -f $@.tmp; state=unchanged; else mv $@.tmp $@; state=written; fi; \
-	echo "=> $@: $(call mk_count,$(MK_COMPDB_SRCS),entry,entries) with the $(PROFILE) flags, $$state"
+	@$(mk_write_compdb)
+	@$(mk_compdb_state); $(mk_compdb_report)
 
 FORCE:
 
@@ -295,6 +310,7 @@ help:
 	    '  distclean     clean, clean-index, tool outputs and .cache/' \
 	    '  unused        unused diagnostics of every source (clang) and unused functions (cppcheck)' \
 	    '  format        clang-format every source in place (format-check only lists the changes)' \
+	    '  list          print every program' \
 	    $(EXTRA_HELP_GOALS) \
 	    '  help          print this help' \
 	    '' \
@@ -306,6 +322,10 @@ help:
 	    '' \
 	    'Each mode builds into bin/<target>-<mode>/ and build/<target>-<mode>/, where <target> is' \
 	    '<arch>-linux-<cc>, for example bin/x86_64-linux-gcc-debug/. Goals run in the order given.' \
-	    $(if $(PROGRAMS),'' 'programs:' $(foreach p,$(PROGRAMS),'  $(p)'))
+	    $(if $(PROGRAMS),'' 'programs ($(words $(PROGRAMS))):' $(foreach p,$(wordlist 1,$(MK_HELP_LIST),$(PROGRAMS)),'  $(p)') \
+	    $(if $(MK_HELP_MORE),'  ... $(words $(MK_HELP_MORE)) more; make list prints every program'))
+
+list:
+	@printf '%s\n' $(PROGRAMS)
 
 endif

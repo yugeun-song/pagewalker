@@ -15,6 +15,13 @@ endif
 KALIAS_DIRS ?= /usr/src
 KCC = $(if $(LLVM),$(filter %/,$(LLVM))clang$(filter -%,$(LLVM)),$(CROSS_COMPILE)gcc)
 KMAKE = $(MAKE) -C kernel KDIR='$(KDIR)' CC='$(KCC)'
+KCOMPDB = $(MAKE) -C '$(KDIR)' M='$(CURDIR)/kernel' CC='$(KCC)' PROFILE='$(PROFILE)' \
+	$(if $(filter debug,$(PROFILE)),W=1) compile_commands.json > /dev/null && \
+	python3 kernel/clang-compdb.py --db kernel/compile_commands.json --kdir '$(KDIR)' --profile '$(PROFILE)' \
+	--headers --link-dirs '$(KALIAS_DIRS)'
+KREFRESH = $(if $(and $(wildcard kernel/compile_commands.json),$(filter-out index compdb,$(MK_GOALS))), \
+	mv kernel/compile_commands.json kernel/compile_commands.json.old && \
+	$(KCOMPDB) --previous kernel/compile_commands.json.old,:)
 
 EXTRA_DEBUG := kmod-debug
 EXTRA_RELEASE := kmod-release
@@ -41,17 +48,16 @@ user: $(foreach p,$(PROGRAMS),$(call mk_bin,$(PROFILE),$(p)))
 kmod-debug:
 	$(KMAKE) PROFILE=debug
 	@echo "=> debug module: kernel/pagewalker.ko for $(KDIR)"
+	@$(if $(filter debug,$(PROFILE)),$(KREFRESH),:)
 
 kmod-release:
 	$(KMAKE) PROFILE=release
 	@echo "=> release module: kernel/pagewalker.ko and its debug info kernel/pagewalker.ko.debug for $(KDIR)"
+	@$(if $(filter release,$(PROFILE)),$(KREFRESH),:)
 
 kmod-compdb: kmod-$(PROFILE)
 	@rm -f kernel/compile_commands.json
-	@$(MAKE) -C '$(KDIR)' M='$(CURDIR)/kernel' CC='$(KCC)' PROFILE='$(PROFILE)' \
-		$(if $(filter debug,$(PROFILE)),W=1) compile_commands.json > /dev/null
-	@python3 kernel/clang-compdb.py --db kernel/compile_commands.json --kdir '$(KDIR)' --profile '$(PROFILE)' \
-		--headers --link-dirs '$(KALIAS_DIRS)'
+	@$(KCOMPDB)
 
 kmod-clean:
 	@$(MAKE) --no-print-directory -C kernel clean > /dev/null

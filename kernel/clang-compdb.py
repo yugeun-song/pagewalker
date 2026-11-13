@@ -97,6 +97,7 @@ def main():
     ap.add_argument("--cscope", help="write the repository sources and the kernel headers they include here")
     ap.add_argument("--link-dirs", default="", help="directories whose links may replace the kernel path")
     ap.add_argument("--map", action="append", default=[], help="OLD=NEW path to rewrite")
+    ap.add_argument("--previous", help="the database this one replaces; report only when they differ")
     opts = ap.parse_args()
     root = os.path.realpath(opts.root)
     kdir = os.path.realpath(opts.kdir)
@@ -142,15 +143,26 @@ def main():
             entry["arguments"] = [tree.sub(new, a) for a in entry["arguments"]]
         headers = [tree.sub(new, h) for h in headers]
 
+    text = json.dumps(db, indent=1) + "\n"
     with open(opts.db + ".tmp", "w") as f:
-        f.write(json.dumps(db, indent=1) + "\n")
+        f.write(text)
     os.replace(opts.db + ".tmp", opts.db)
+    if opts.previous:
+        try:
+            with open(opts.previous) as f:
+                unchanged = f.read() == text
+            os.remove(opts.previous)
+        except OSError:
+            unchanged = False
+        if unchanged:
+            return
     via = f", kernel via {link}" if link else ""
     with_headers = f" ({added} headers)" if opts.headers else ""
     print(f"=> {os.path.relpath(opts.db)}: {len(db)} entries{with_headers} with the {opts.profile} flags "
           f"for {kdir}{via}, {len(rejected)} gcc-only flags dropped")
-    for flag in rejected:
-        print(f"  dropped {flag}")
+    if not opts.previous:
+        for flag in rejected:
+            print(f"  dropped {flag}")
 
     if opts.cscope:
         repo = tracked(root, ["*.c", "*.h"])

@@ -187,7 +187,9 @@ the same file as in linux-kernel-samples, fits it to clangd:
   tree, so the database survives a kernel upgrade (`KALIAS_DIRS=` lists other
   directories to look in).
 
-Both databases are git-ignored. The kernel database needs `python3` and `clang`.
+Once written, both databases are rewritten by every build whose flags changed,
+so an editor never reads stale flags. Both are git-ignored. The kernel database
+needs `python3` and `clang`.
 
 ## Build
 
