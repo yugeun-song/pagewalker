@@ -151,7 +151,8 @@ pagewalker/
 │   ├── pagewalker_device.c       #   character device + ioctl dispatch (module entry)
 │   ├── walk.c, walk.h            #   page-table walk + bulk read (command 2)
 │   ├── arch.h                    #   per-arch inline layer (root register, level fold)
-│   └── profile.mk                #   debug / release compiler flags for Kbuild
+│   ├── profile.mk                #   debug / release compiler flags for Kbuild
+│   └── clang-compdb.py           #   makes the kbuild compile database fit clangd
 ├── user/                         # CLI -> pagewalkerctl
 │   ├── pagewalkerctl.c           #   argument handling + dispatch
 │   ├── pagewalkerctl.h           #   CLI umbrella header (includes, out_fmt)
@@ -172,14 +173,21 @@ that keeps braces on every control statement.
 
 Source indexes are built on demand and are not part of the default build:
 `make index` writes `tags` (ctags), `cscope.out` and two `compile_commands.json`,
-one for `kernel/` read from the module's Kbuild `.cmd` files and one at the root
-for `user/` written by `build.mk`, both with the `PROFILE` flags, so `clangd`
-resolves symbols as an LSP in parallel with ctags/cscope; `make clean-index`
-removes them. The kernel database drops the GCC-only kernel build flags that
-clang rejects, probed with `clang` when it is written.
-Both databases carry absolute, kernel-tree-specific paths and are regenerated
-after changing `KDIR`, so they are git-ignored. The kernel database needs
-`python3`.
+one for `kernel/` and one at the root for `user/` written by `build.mk`, both
+with the `PROFILE` flags, so `clangd` resolves symbols as an LSP in parallel
+with ctags/cscope; `make clean-index` removes them. Kbuild writes the kernel
+database (`make M=kernel compile_commands.json`), and `kernel/clang-compdb.py`,
+the same file as in linux-kernel-samples, fits it to clangd:
+
+- it drops every flag the local `clang` rejects, probed one by one, such as the
+  GCC-only `-mrecord-mcount` that otherwise fails the whole command;
+- it gives `arch.h`, `walk.h` and `pagewalker_common.h` the command of a source
+  that includes them, so a header opened alone sees the kernel's `CONFIG_*`;
+- it writes kernel paths through `/usr/src/linux` when that link names the
+  tree, so the database survives a kernel upgrade (`KALIAS_DIRS=` lists other
+  directories to look in).
+
+Both databases are git-ignored. The kernel database needs `python3` and `clang`.
 
 ## Build
 
