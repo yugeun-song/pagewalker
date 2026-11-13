@@ -4,9 +4,9 @@
 #include <linux/capability.h>
 #include <linux/fs.h>
 #include <linux/init.h>
-#include <linux/kernel.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
+#include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/stddef.h>
 #include <linux/uaccess.h>

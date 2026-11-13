@@ -1,12 +1,6 @@
 #ifndef USER_PAGEWALKERCTL_H
 #define USER_PAGEWALKERCTL_H
 
-#include "../include/pagewalker_common.h"
-#include "dump.h"
-#include "read.h"
-#include "report.h"
-#include "symbols.h"
-
 #define PID_MAX_FILE "/proc/sys/kernel/pid_max"
 /*
  * Fallback only for when /proc/sys/kernel/pid_max is unreadable: the 64-bit

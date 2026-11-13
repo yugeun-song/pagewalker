@@ -3,15 +3,14 @@
 
 #include "walk.h"
 
-#include <linux/bits.h>
 #include <linux/io.h>
-#include <linux/ioport.h>
-#include <linux/kernel.h>
 #include <linux/memory_hotplug.h>
+#include <linux/minmax.h>
 #include <linux/mm.h>
 #include <linux/pfn.h>
 #include <linux/pgtable.h>
 #include <linux/pid.h>
+#include <linux/printk.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
 #include <linux/slab.h>

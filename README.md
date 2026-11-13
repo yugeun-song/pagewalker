@@ -164,7 +164,7 @@ pagewalker/
 │   └── check-kernel-tree.py      #   reads the architecture and toolchain of KDIR
 ├── user/                         # CLI -> pagewalkerctl
 │   ├── pagewalkerctl.c           #   argument handling + dispatch
-│   ├── pagewalkerctl.h           #   CLI umbrella header (includes, out_fmt)
+│   ├── pagewalkerctl.h           #   CLI constants (pid_max fallback, out_fmt)
 │   ├── abi_layout.h              #   ioctl layout check of the CLI (debug builds)
 │   ├── report.c                  #   walk report + per-arch flag decode
 │   ├── dump.c                    #   hexdump / CJK-aware gutter

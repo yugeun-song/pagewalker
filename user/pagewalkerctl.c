@@ -14,7 +14,12 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include "../include/pagewalker_common.h"
 #include "abi_layout.h"
+#include "dump.h"
+#include "read.h"
+#include "report.h"
+#include "symbols.h"
 
 static void print_usage(const char *const prog_name)
 {
