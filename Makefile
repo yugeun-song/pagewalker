@@ -3,7 +3,6 @@ PROGRAMS := pagewalkerctl selftest
 pagewalkerctl_SRCS := user/pagewalkerctl.c user/report.c user/dump.c user/symbols.c user/read.c
 selftest_SRCS := user/selftest.c
 selftest_STATIC := 1
-FORMAT_SRCS := $(shell git ls-files -- 'user/*.c' 'user/*.h' 2> /dev/null)
 
 KVER ?= $(shell uname -r)
 ifeq ($(origin KDIR),undefined)

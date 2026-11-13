@@ -1,102 +1,108 @@
-// SPDX-License-Identifier: 0BSD
+/* SPDX-License-Identifier: 0BSD */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/init.h>
-#include <linux/miscdevice.h>
-#include <linux/fs.h>
-#include <linux/uaccess.h>
-#include <linux/slab.h>
 #include <linux/capability.h>
+#include <linux/fs.h>
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/miscdevice.h>
+#include <linux/module.h>
+#include <linux/slab.h>
+#include <linux/uaccess.h>
 
 #include "walk.h"
 
-static int pagewalker_open(struct inode *inode, struct file *file);
-static long pagewalker_ioctl(struct file *file, unsigned int cmd, unsigned long arg);
+static int pagewalker_open(struct inode *const inode, struct file *const file);
+static long pagewalker_handle_ioctl(struct file *const file, unsigned int cmd, unsigned long arg);
 
-static const struct file_operations pagewalker_fops = {
+static const struct file_operations gs_pagewalker_fops = {
 	.owner = THIS_MODULE,
 	.open = pagewalker_open,
-	.unlocked_ioctl = pagewalker_ioctl,
+	.unlocked_ioctl = pagewalker_handle_ioctl,
 };
 
-static struct miscdevice pagewalker_device = {
+static struct miscdevice gs_pagewalker_device = {
 	.minor = MISC_DYNAMIC_MINOR,
 	.name = PAGEWALKER_DEVICE_NAME,
-	.fops = &pagewalker_fops,
+	.fops = &gs_pagewalker_fops,
 };
 
 /* Command 1: resolve one address and report its single-u64 content. */
 static long pagewalker_get_info(unsigned long arg)
 {
 	struct pagewalker_request req;
-	u64 saved_vaddr;
-	int ret;
 
-	if (copy_from_user(&req, (void __user *)arg, sizeof(req)))
+	if (copy_from_user(&req, (void __user *)arg, sizeof(req)) != 0) {
 		return -EFAULT;
+	}
 
 	/* Preserve the caller-supplied input; zero the rest of the result. */
-	saved_vaddr = req.info.target_vaddr;
+	u64 saved_vaddr = req.info.target_vaddr;
+
 	memset(&req.info, 0, sizeof(req.info));
 	req.info.target_vaddr = saved_vaddr;
 
 	/*
 	 * A negative return is a hard error (bad pid / non-canonical address /
 	 * no such task) reported via errno. A completed walk returns 0 with
-	 * res->is_valid telling apart "mapped" from "not mapped".
+	 * req.info.is_valid telling apart "mapped" from "not mapped".
 	 */
-	ret = perform_page_walk(req.pid, &req.info);
-	if (ret < 0)
+	int ret = perform_page_walk(&req.info, (pid_t)req.pid);
+	if (ret < 0) {
 		return ret;
+	}
 
-	if (copy_to_user((void __user *)arg, &req, sizeof(req)))
+	if (copy_to_user((void __user *)arg, &req, sizeof(req)) != 0) {
 		return -EFAULT;
+	}
 	return 0;
 }
 
 /* Command 2: copy a run of bytes and report the walk of its start address. */
 static long pagewalker_read(unsigned long arg)
 {
-	struct pagewalker_read_request *rr;
+	struct pagewalker_read_request *req = kmalloc(sizeof(*req), GFP_KERNEL);
+	if (req == NULL) {
+		return -ENOMEM;
+	}
+
 	long ret;
 
-	rr = kmalloc(sizeof(*rr), GFP_KERNEL);
-	if (!rr)
-		return -ENOMEM;
-
-	if (copy_from_user(rr, (void __user *)arg, sizeof(*rr))) {
+	if (copy_from_user(req, (void __user *)arg, sizeof(*req)) != 0) {
 		ret = -EFAULT;
-		goto out;
+		goto out_free_req;
 	}
 
 	/*
 	 * A negative return is a hard error (bad pid / no such task). A completed
-	 * call returns 0; rr->bytes_read and rr->stopped report how far the run
-	 * got, and rr->info carries the walk of the start address.
+	 * call returns 0; req->bytes_read and req->stopped report how far the run
+	 * got, and req->info carries the walk of the start address.
 	 */
-	ret = perform_read(rr);
-	if (ret < 0)
-		goto out;
+	ret = perform_read(req);
+	if (ret < 0) {
+		goto out_free_req;
+	}
 
-	if (copy_to_user((void __user *)arg, rr, sizeof(*rr)))
+	if (copy_to_user((void __user *)arg, req, sizeof(*req)) != 0) {
 		ret = -EFAULT;
+	}
 
-out:
-	kfree(rr);
+out_free_req:
+	kfree(req);
+	req = NULL;
 	return ret;
 }
 
-static int pagewalker_open(struct inode *inode, struct file *file)
+static int pagewalker_open(struct inode *const inode, struct file *const file)
 {
-	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
+	return (capable(CAP_SYS_RAWIO)) ? 0 : -EPERM;
 }
 
-static long pagewalker_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+static long pagewalker_handle_ioctl(struct file *const file, unsigned int cmd, unsigned long arg)
 {
-	if (!capable(CAP_SYS_RAWIO))
+	if (!capable(CAP_SYS_RAWIO)) {
 		return -EPERM;
+	}
 
 	switch (cmd) {
 	case PAGEWALKER_IOC_GET_INFO:
@@ -110,21 +116,21 @@ static long pagewalker_ioctl(struct file *file, unsigned int cmd, unsigned long 
 
 static int __init pagewalker_init(void)
 {
-	int ret = misc_register(&pagewalker_device);
+	int ret = misc_register(&gs_pagewalker_device);
 
-	if (ret) {
+	if (ret != 0) {
 		pr_err("failed to register misc device: %d\n", ret);
 		return ret;
 	}
 
 	pr_info("loaded: /dev/%s ready (minor %d)\n",
-		PAGEWALKER_DEVICE_NAME, pagewalker_device.minor);
+		PAGEWALKER_DEVICE_NAME, gs_pagewalker_device.minor);
 	return ret;
 }
 
 static void __exit pagewalker_exit(void)
 {
-	misc_deregister(&pagewalker_device);
+	misc_deregister(&gs_pagewalker_device);
 	pr_info("unloaded\n");
 }
 

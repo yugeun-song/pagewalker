@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: 0BSD */
-#ifndef PAGEWALKER_KERNEL_WALK_H
-#define PAGEWALKER_KERNEL_WALK_H
+#ifndef KERNEL_WALK_H
+#define KERNEL_WALK_H
 
-#include <linux/mm.h>
 #include <linux/types.h>
 
 #include "../include/pagewalker_common.h"
@@ -14,17 +13,13 @@
  * transparently; perform_page_walk drives a process address space and
  * perform_kernel_walk the kernel's own, rooted at the arch kernel table.
  */
-void pw_set_geometry(struct pagewalker_result *res);
-const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
-			   struct pagewalker_result *res, struct folio **pin);
-int perform_page_walk(pid_t pid, struct pagewalker_result *res);
-int perform_kernel_walk(struct pagewalker_result *res);
+int perform_page_walk(struct pagewalker_result *const mut_res, pid_t pid);
 
 /*
  * Bulk read (command 2), layered on the walk above: copy a run of bytes out of a
  * target address space, re-walking each page and vetting every frame as System
  * RAM. Fault-tolerant: a hole or unmapped page truncates the run.
  */
-int perform_read(struct pagewalker_read_request *rr);
+int perform_read(struct pagewalker_read_request *const mut_req);
 
-#endif /* PAGEWALKER_KERNEL_WALK_H */
+#endif /* KERNEL_WALK_H */

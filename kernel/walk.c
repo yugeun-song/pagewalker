@@ -1,23 +1,24 @@
-// SPDX-License-Identifier: 0BSD
+/* SPDX-License-Identifier: 0BSD */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/kernel.h>
-#include <linux/mm.h>
-#include <linux/memory_hotplug.h>
+#include "walk.h"
+
+#include <linux/bits.h>
 #include <linux/hugetlb_inline.h>
-#include <linux/sched/mm.h>
-#include <linux/sched/task.h>
-#include <linux/uaccess.h>
-#include <linux/pid.h>
-#include <linux/pfn.h>
-#include <linux/pgtable.h>
 #include <linux/io.h>
 #include <linux/ioport.h>
-#include <linux/bits.h>
+#include <linux/kernel.h>
+#include <linux/memory_hotplug.h>
+#include <linux/mm.h>
+#include <linux/pfn.h>
+#include <linux/pgtable.h>
+#include <linux/pid.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/task.h>
 #include <linux/slab.h>
 #include <linux/threads.h>
+#include <linux/uaccess.h>
 
-#include "walk.h"
 #include "arch.h"
 
 #define ENTRY_SIZE 8 /* page-table entry is 8 bytes on every 64-bit arch */
@@ -31,9 +32,9 @@
  * used instead of pmd_present()/pud_present() only so one expression serves all
  * three arches uniformly.
  */
-static bool entry_present(u64 entry_val)
+static bool is_entry_present(u64 entry_val)
 {
-	return pte_present(__pte(entry_val));
+	return pte_present(__pte(entry_val)) != 0;
 }
 
 /*
@@ -46,71 +47,72 @@ static bool entry_present(u64 entry_val)
  * bits, e.g. va[15:12] of a riscv 64K NAPOT page). base_phys_raw is the leaf
  * entry's frame base (PFN_PHYS(*_pfn) or the arch table-phys extractor).
  */
-static void set_leaf(struct pagewalker_result *res, unsigned long vaddr,
-		     u64 base_phys_raw, u64 size, u32 level, bool contiguous)
+static void set_leaf(struct pagewalker_result *const mut_res, unsigned long vaddr,
+		     u64 base_phys_raw, u64 size, u32 level, bool is_contiguous)
 {
 	u64 mask = size - 1;
 
-	res->page_size = size;
-	res->mapping_level = level;
-	res->is_contiguous = contiguous ? 1 : 0;
-	res->page_base_phys = base_phys_raw & ~mask;
-	res->page_offset = vaddr & mask;
-	res->final_phys_addr = res->page_base_phys + res->page_offset;
-	res->is_valid = 1;
+	mut_res->page_size = size;
+	mut_res->mapping_level = level;
+	mut_res->is_contiguous = (is_contiguous) ? 1 : 0;
+	mut_res->page_base_phys = base_phys_raw & ~mask;
+	mut_res->page_offset = vaddr & mask;
+	mut_res->final_phys_addr = mut_res->page_base_phys + mut_res->page_offset;
+	mut_res->is_valid = 1;
 }
 
 static struct folio *pw_pin_frame(u64 phys)
 {
 	struct page *page = pfn_to_online_page(PHYS_PFN(phys));
-	struct folio *folio;
-
-	if (!page)
+	if (page == NULL) {
 		return NULL;
+	}
+
 	for (;;) {
-		folio = page_folio(page);
-		if (!folio_try_get(folio))
+		struct folio *folio = page_folio(page);
+
+		if (!folio_try_get(folio)) {
 			return NULL;
-		if (page_folio(page) == folio)
+		}
+		if (page_folio(page) == folio) {
 			return folio;
+		}
 		folio_put(folio);
+		folio = NULL;
 	}
 }
 
-static void pw_unpin(struct folio **pin)
+static void pw_unpin(struct folio **const mut_pin)
 {
-	if (*pin) {
-		folio_put(*pin);
-		*pin = NULL;
+	if (*mut_pin != NULL) {
+		folio_put(*mut_pin);
+		*mut_pin = NULL;
 	}
 }
 
-static bool pw_pinned_range(struct folio *pin, u64 phys, size_t len)
+static bool pw_is_range_pinned(const struct folio *const pin_nullable, u64 phys, size_t len)
 {
-	u64 base;
-
-	if (!pin)
+	if (pin_nullable == NULL) {
 		return false;
-	base = PFN_PHYS(folio_pfn(pin));
-	return phys >= base && phys - base + len <= folio_size(pin);
+	}
+
+	u64 base = PFN_PHYS(folio_pfn(pin_nullable));
+
+	return phys >= base && phys - base + len <= folio_size(pin_nullable);
 }
 
 /*
  * Safe Physical Memory Reader
  * Validates memory presence and performs fault-tolerant reading.
  */
-static void read_physical_content(struct pagewalker_result *res, struct folio *pin,
-				  bool need_pin)
+static void read_physical_content(struct pagewalker_result *const mut_res,
+				  const struct folio *const pin_nullable, bool needs_pin)
 {
-	void *kaddr;
-	unsigned long val = 0;
-	bool ok;
-
 	/*
-	 * pin is the folio reference the walk took on this frame while its
-	 * mapping was still validated, so the frame cannot be freed and reused
+	 * pin_nullable is the folio reference the walk took on this frame while
+	 * its mapping was still validated, so the frame cannot be freed and reused
 	 * under the read; the u64 must lie inside that folio. A process walk
-	 * (need_pin) reads nothing it could not pin; a kernel walk may read an
+	 * (needs_pin) reads nothing it could not pin; a kernel walk may read an
 	 * unpinnable frame (free page, refcount zero) since the kernel address
 	 * space names the frame itself. A memmap entry does NOT prove the frame
 	 * is usable RAM (it may be a reserved region or a hole inside an
@@ -122,22 +124,27 @@ static void read_physical_content(struct pagewalker_result *res, struct folio *p
 	 * an MMIO/device-register access (the same hazard the bulk read refuses by
 	 * default).
 	 */
-	ok = pin ? pw_pinned_range(pin, res->final_phys_addr, sizeof(val))
-		 : (!need_pin && pfn_valid(PHYS_PFN(res->final_phys_addr)));
-	if (!ok || !page_is_ram(PHYS_PFN(res->final_phys_addr))) {
-		res->value_at_phys = 0xffffffffffffffff;
+	bool can_read;
+
+	if (pin_nullable != NULL) {
+		can_read = pw_is_range_pinned(pin_nullable, mut_res->final_phys_addr,
+					      sizeof(mut_res->value_at_phys));
+	} else {
+		can_read = !needs_pin && pfn_valid(PHYS_PFN(mut_res->final_phys_addr)) != 0;
+	}
+	if (!can_read || page_is_ram(PHYS_PFN(mut_res->final_phys_addr)) == 0) {
+		mut_res->value_at_phys = 0xFFFFFFFFFFFFFFFF;
 		return;
 	}
 
-	/* Get Kernel Virtual Address (Direct Mapping) */
-	kaddr = phys_to_virt(res->final_phys_addr);
+	void *kaddr = phys_to_virt(mut_res->final_phys_addr);
 
 	/*
 	 * Fault-tolerant read: copy_from_kernel_nofault() probes the address
 	 * and returns an error (leaving the sentinel) instead of faulting.
 	 */
-	res->value_at_phys = 0xffffffffffffffff;
-	copy_from_kernel_nofault(&res->value_at_phys, kaddr, sizeof(val));
+	mut_res->value_at_phys = 0xFFFFFFFFFFFFFFFF;
+	copy_from_kernel_nofault(&mut_res->value_at_phys, kaddr, sizeof(mut_res->value_at_phys));
 }
 
 /*
@@ -153,52 +160,44 @@ static u64 read_entry_phys(unsigned long slot_phys)
 {
 	u64 val = ~0ULL;
 
-	if (!pfn_valid(PHYS_PFN(slot_phys)))
+	if (pfn_valid(PHYS_PFN(slot_phys)) == 0) {
 		return val;
+	}
 
 	copy_from_kernel_nofault(&val, phys_to_virt(slot_phys), sizeof(val));
 	return val;
 }
 
 /* Record the arch-global walk geometry (level count, page size, VA width). */
-void pw_set_geometry(struct pagewalker_result *res)
+static void pw_set_geometry(struct pagewalker_result *const mut_res)
 {
-	res->paging_level = arch_paging_level();
-	res->page_shift = PAGE_SHIFT;
-	res->va_bits = arch_va_bits();
+	mut_res->paging_level = pw_arch_get_paging_level();
+	mut_res->page_shift = PAGE_SHIFT;
+	mut_res->va_bits = pw_arch_get_va_bits();
 }
 
 /*
  * Architecture-neutral core of the walk, rooted at an explicit pgd table rather
  * than at an mm. `pgd_root` is mm->pgd for a process walk and the kernel root
- * (arch_kernel_pgd()) for a kernel walk. `mm` is non-NULL only for a process
- * walk: it is used to take the page-table locks under which the leaf is
- * validated and its frame pinned (the PTE-level lock also blocks a khugepaged
- * collapse). Kernel page tables (text / linear map / vmalloc) are not
- * collapsed under us, so the kernel walk passes mm == NULL and skips the locks.
- * Returns a short human reason for the log; res->is_valid distinguishes mapped
- * from not-mapped. *pin receives a folio reference on the mapped frame (NULL if
- * none could be taken); the caller drops it with pw_unpin() after its read.
- * The caller must set res->target_vaddr and the geometry, and (for a process
- * walk) hold mmap_read_lock(mm) across the call.
+ * (pw_arch_get_kernel_pgd()) for a kernel walk. `mut_mm_nullable` is non-NULL only
+ * for a process walk: it is used to take the page-table locks under which the
+ * leaf is validated and its frame pinned (the PTE-level lock also blocks a
+ * khugepaged collapse). Kernel page tables (text / linear map / vmalloc) are not
+ * collapsed under us, so the kernel walk passes NULL and skips the locks.
+ * Returns a short human reason for the log; mut_res->is_valid distinguishes
+ * mapped from not-mapped. *mut_pin receives a folio reference on the mapped
+ * frame (NULL if none could be taken); the caller drops it with pw_unpin() after
+ * its read. The caller must set mut_res->target_vaddr and the geometry, and (for
+ * a process walk) hold mmap_read_lock(mm) across the call.
  */
-const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
-			   struct pagewalker_result *res, struct folio **pin)
+static const char *pw_walk_levels(struct pagewalker_result *const mut_res,
+				  struct folio **const mut_pin,
+				  struct mm_struct *const mut_mm_nullable, pgd_t *const pgd_root)
 {
-	unsigned long vaddr = arch_untag_addr(res->target_vaddr);
-	pgd_t *pgd;
-	p4d_t *p4d;
-	pud_t *pud;
-	pmd_t *pmd;
-	pte_t *pte;
-	pgd_t pgde;
-	p4d_t p4de;
-	pud_t pude;
-	pmd_t pmde;
-	pte_t pte_entry;
-	bool hugetlb = false;
+	unsigned long vaddr = pw_arch_untag_addr(mut_res->target_vaddr);
+	bool is_hugetlb = false;
 
-	*pin = NULL;
+	*mut_pin = NULL;
 
 	/*
 	 * Anchor a process walk to a live VMA. munmap()/mremap()/brk-shrink detach
@@ -210,165 +209,205 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 	 * already gone from the tree when we look it up here; confirming a VMA still
 	 * covers vaddr keeps the walk off page tables being freed. free_pgtables'
 	 * floor/ceiling never cross a live neighbouring VMA, so a covered address's
-	 * tables stay put. A kernel walk (mm == NULL) has no VMAs and is rooted at
-	 * stable tables, so it skips this.
+	 * tables stay put. A kernel walk (no mm) has no VMAs and is rooted at stable
+	 * tables, so it skips this.
 	 */
-	if (mm) {
-		struct vm_area_struct *vma = find_vma(mm, vaddr);
+	if (mut_mm_nullable != NULL) {
+		struct vm_area_struct *vma = find_vma(mut_mm_nullable, vaddr);
 
-		if (!vma || vaddr < vma->vm_start)
+		if (vma == NULL || vaddr < vma->vm_start) {
 			return "no VMA covers this address";
-		hugetlb = is_vm_hugetlb_page(vma);
+		}
+		is_hugetlb = is_vm_hugetlb_page(vma);
 	}
 
 	/*
 	 * Root page-table base = the value programmed into the arch root
 	 * translation register (CR3 / TTBR0_EL1|TTBR1_EL1 / satp.PPN<<PAGE_SHIFT).
 	 */
-	res->root_table_phys = virt_to_phys(pgd_root);
+	mut_res->root_table_phys = virt_to_phys(pgd_root);
 
-	res->pgd_idx = pgd_index(vaddr);
-	pgd = pgd_root + pgd_index(vaddr);
-	pgde = pgdp_get(pgd);
-	res->pgd_base_phys = virt_to_phys(pgd_root);
-	res->pgd_val = pgd_val(pgde);
-	res->pgd_readback = read_entry_phys(res->pgd_base_phys + res->pgd_idx * ENTRY_SIZE);
+	mut_res->pgd_idx = pgd_index(vaddr);
 
-	if (pgd_none(pgde) || pgd_bad(pgde))
+	pgd_t *pgd = pgd_root + pgd_index(vaddr);
+	pgd_t pgde = pgdp_get(pgd);
+
+	mut_res->pgd_base_phys = virt_to_phys(pgd_root);
+	mut_res->pgd_val = pgd_val(pgde);
+	mut_res->pgd_readback = read_entry_phys(mut_res->pgd_base_phys +
+						(mut_res->pgd_idx * ENTRY_SIZE));
+
+	if (pgd_none(pgde) != 0 || pgd_bad(pgde) != 0) {
 		return "PGD entry empty or bad";
+	}
 
-	res->p4d_idx = p4d_index(vaddr);
-	p4d = pw_p4d_offset(pgd, vaddr);
-	p4de = p4dp_get(p4d);
+	mut_res->p4d_idx = p4d_index(vaddr);
+
+	p4d_t *p4d = pw_get_p4d_slot(pgd, vaddr);
+	p4d_t p4de = p4dp_get(p4d);
+
 	/*
 	 * For a hardware-present level the next table base comes from the entry;
 	 * for a folded level the accessor returns the parent slot, so reuse the
 	 * parent's base (its index, here 0, is added separately at read-back).
 	 */
-	if (res->paging_level == PAGING_LEVEL_5)
-		res->p4d_base_phys = arch_entry_to_table_phys(pgd_val(pgde));
-	else
-		res->p4d_base_phys = res->pgd_base_phys;
-	res->p4d_val = p4d_val(p4de);
-	res->p4d_readback = read_entry_phys(res->p4d_base_phys + res->p4d_idx * ENTRY_SIZE);
+	if (mut_res->paging_level == PAGING_LEVEL_5) {
+		mut_res->p4d_base_phys = pw_arch_extract_table_phys(pgd_val(pgde));
+	} else {
+		mut_res->p4d_base_phys = mut_res->pgd_base_phys;
+	}
+	mut_res->p4d_val = p4d_val(p4de);
+	mut_res->p4d_readback = read_entry_phys(mut_res->p4d_base_phys +
+						(mut_res->p4d_idx * ENTRY_SIZE));
 
-	if (p4d_none(p4de))
+	if (p4d_none(p4de) != 0) {
 		return "P4D entry empty";
+	}
 
 	if (p4d_leaf(p4de)) {
-		p4d_t cur;
-
 		/* See the pud_leaf() note: gate residency via pte_present() mirror. */
-		if (!entry_present(p4d_val(p4de)))
+		if (!is_entry_present(p4d_val(p4de))) {
 			return "P4D huge entry not present (swap/migration)";
-		set_leaf(res, vaddr, arch_entry_to_table_phys(p4d_val(p4de)),
+		}
+		set_leaf(mut_res, vaddr, pw_arch_extract_table_phys(p4d_val(p4de)),
 			 p4d_leaf_size(p4de), PW_LEAF_P4D, false);
-		if (mm)
-			spin_lock(&mm->page_table_lock);
-		*pin = pw_pin_frame(res->final_phys_addr);
-		cur = p4dp_get(p4d);
-		if (!p4d_leaf(cur) || !entry_present(p4d_val(cur)) ||
-		    arch_entry_to_table_phys(p4d_val(cur)) != arch_entry_to_table_phys(p4d_val(p4de)))
-			pw_unpin(pin);
-		if (mm)
-			spin_unlock(&mm->page_table_lock);
-		read_physical_content(res, *pin, mm != NULL);
+		if (mut_mm_nullable != NULL) {
+			spin_lock(&mut_mm_nullable->page_table_lock);
+		}
+		*mut_pin = pw_pin_frame(mut_res->final_phys_addr);
+
+		p4d_t cur = p4dp_get(p4d);
+
+		if (!p4d_leaf(cur) || !is_entry_present(p4d_val(cur)) ||
+		    (pw_arch_extract_table_phys(p4d_val(cur)) !=
+		     pw_arch_extract_table_phys(p4d_val(p4de)))) {
+			pw_unpin(mut_pin);
+		}
+		if (mut_mm_nullable != NULL) {
+			spin_unlock(&mut_mm_nullable->page_table_lock);
+		}
+		read_physical_content(mut_res, *mut_pin, mut_mm_nullable != NULL);
 		return "mapped via P4D-level huge page";
 	}
 
-	if (p4d_bad(p4de))
+	if (p4d_bad(p4de) != 0) {
 		return "P4D entry bad";
+	}
 
-	res->pud_idx = pud_index(vaddr);
-	pud = pw_pud_offset(p4d, vaddr);
-	pude = pudp_get(pud);
-	if (res->paging_level >= PAGING_LEVEL_4)
-		res->pud_base_phys = arch_entry_to_table_phys(p4d_val(p4de));
-	else
-		res->pud_base_phys = res->p4d_base_phys;
-	res->pud_val = pud_val(pude);
-	res->pud_readback = read_entry_phys(res->pud_base_phys + res->pud_idx * ENTRY_SIZE);
+	mut_res->pud_idx = pud_index(vaddr);
 
-	if (pud_none(pude))
+	pud_t *pud = pw_get_pud_slot(p4d, vaddr);
+	pud_t pude = pudp_get(pud);
+
+	if (mut_res->paging_level >= PAGING_LEVEL_4) {
+		mut_res->pud_base_phys = pw_arch_extract_table_phys(p4d_val(p4de));
+	} else {
+		mut_res->pud_base_phys = mut_res->p4d_base_phys;
+	}
+	mut_res->pud_val = pud_val(pude);
+	mut_res->pud_readback = read_entry_phys(mut_res->pud_base_phys +
+						(mut_res->pud_idx * ENTRY_SIZE));
+
+	if (pud_none(pude) != 0) {
 		return "PUD entry empty";
+	}
 
 	if (pud_leaf(pude)) {
-		spinlock_t *ptl = NULL;
-		pud_t cur;
-
 		/*
 		 * pud_leaf() reports a 1G mapping but says nothing about residency.
-		 * Gate on entry_present() (a pte_present() mirror) so a swapped or
+		 * Gate on is_entry_present() (a pte_present() mirror) so a swapped or
 		 * migrating huge entry is rejected while a resident PROT_NONE / NUMA-
 		 * balancing huge page stays valid.
 		 */
-		if (!entry_present(pud_val(pude)))
+		if (!is_entry_present(pud_val(pude))) {
 			return "PUD huge entry not present (swap/migration)";
-		set_leaf(res, vaddr, PFN_PHYS(pud_pfn(pude)),
+		}
+		set_leaf(mut_res, vaddr, PFN_PHYS(pud_pfn(pude)),
 			 pud_leaf_size(pude), PW_LEAF_PUD,
 			 pud_leaf_size(pude) != PUD_SIZE);
-		if (mm)
-			ptl = pud_lock(mm, pud);
-		*pin = pw_pin_frame(res->final_phys_addr);
-		cur = pudp_get(pud);
-		if (!pud_leaf(cur) || !entry_present(pud_val(cur)) || pud_pfn(cur) != pud_pfn(pude))
-			pw_unpin(pin);
-		if (ptl)
+
+		spinlock_t *ptl = NULL;
+
+		if (mut_mm_nullable != NULL) {
+			ptl = pud_lock(mut_mm_nullable, pud);
+		}
+		*mut_pin = pw_pin_frame(mut_res->final_phys_addr);
+
+		pud_t cur = pudp_get(pud);
+
+		if (!pud_leaf(cur) || !is_entry_present(pud_val(cur)) ||
+		    pud_pfn(cur) != pud_pfn(pude)) {
+			pw_unpin(mut_pin);
+		}
+		if (ptl != NULL) {
 			spin_unlock(ptl);
-		read_physical_content(res, *pin, mm != NULL);
+		}
+		read_physical_content(mut_res, *mut_pin, mut_mm_nullable != NULL);
 		return "mapped via PUD-level huge page";
 	}
 
-	if (pud_bad(pude))
+	if (pud_bad(pude) != 0) {
 		return "PUD entry bad";
+	}
 
-	res->pmd_idx = pmd_index(vaddr);
-	pmd = pmd_offset(pud, vaddr);
-	pmde = pmdp_get_lockless(pmd);
-	res->pmd_base_phys = arch_entry_to_table_phys(pud_val(pude));
-	res->pmd_val = pmd_val(pmde);
-	res->pmd_readback = read_entry_phys(res->pmd_base_phys + res->pmd_idx * ENTRY_SIZE);
+	mut_res->pmd_idx = pmd_index(vaddr);
 
-	if (pmd_none(pmde))
+	pmd_t *pmd = pmd_offset(pud, vaddr);
+	pmd_t pmde = pmdp_get_lockless(pmd);
+
+	mut_res->pmd_base_phys = pw_arch_extract_table_phys(pud_val(pude));
+	mut_res->pmd_val = pmd_val(pmde);
+	mut_res->pmd_readback = read_entry_phys(mut_res->pmd_base_phys +
+						(mut_res->pmd_idx * ENTRY_SIZE));
+
+	if (pmd_none(pmde) != 0) {
 		return "PMD entry empty";
+	}
 
 	if (pmd_leaf(pmde)) {
-		spinlock_t *ptl = NULL;
-		pmd_t cur;
-
 		/* See the pud_leaf() note: present|protnone, mirroring pte_present(). */
-		if (!entry_present(pmd_val(pmde)))
+		if (!is_entry_present(pmd_val(pmde))) {
 			return "PMD huge entry not present (swap/migration)";
-		set_leaf(res, vaddr, PFN_PHYS(pmd_pfn(pmde)),
+		}
+		set_leaf(mut_res, vaddr, PFN_PHYS(pmd_pfn(pmde)),
 			 pmd_leaf_size(pmde), PW_LEAF_PMD,
 			 pmd_leaf_size(pmde) != PMD_SIZE);
+
+		spinlock_t *ptl = NULL;
+
 		/*
 		 * A hugetlb PMD table may be shared and torn down by another mm
 		 * outside our mmap lock, so its ptl is not safe to take: pin and
 		 * re-read without it, as the kernel walk does.
 		 */
-		if (mm && !hugetlb)
-			ptl = pmd_lock(mm, pmd);
-		*pin = pw_pin_frame(res->final_phys_addr);
-		cur = pmdp_get(pmd);
-		if (!pmd_leaf(cur) || !entry_present(pmd_val(cur)) || pmd_pfn(cur) != pmd_pfn(pmde))
-			pw_unpin(pin);
-		if (ptl)
+		if (mut_mm_nullable != NULL && !is_hugetlb) {
+			ptl = pmd_lock(mut_mm_nullable, pmd);
+		}
+		*mut_pin = pw_pin_frame(mut_res->final_phys_addr);
+
+		pmd_t cur = pmdp_get(pmd);
+
+		if (!pmd_leaf(cur) || !is_entry_present(pmd_val(cur)) ||
+		    pmd_pfn(cur) != pmd_pfn(pmde)) {
+			pw_unpin(mut_pin);
+		}
+		if (ptl != NULL) {
 			spin_unlock(ptl);
-		read_physical_content(res, *pin, mm != NULL);
+		}
+		read_physical_content(mut_res, *mut_pin, mut_mm_nullable != NULL);
 		return "mapped via PMD-level huge page";
 	}
 
-	if (pmd_bad(pmde))
+	if (pmd_bad(pmde) != 0) {
 		return "PMD entry bad";
+	}
 
-	res->pte_idx = pte_index(vaddr);
-	res->pte_base_phys = arch_entry_to_table_phys(pmd_val(pmde));
+	mut_res->pte_idx = pte_index(vaddr);
+	mut_res->pte_base_phys = pw_arch_extract_table_phys(pmd_val(pmde));
 
-	if (mm) {
-		spinlock_t *pml;
-		spinlock_t *ptl;
+	pte_t pte_entry;
 
+	if (mut_mm_nullable != NULL) {
 		/*
 		 * The PTE table can be retracted under us by khugepaged /
 		 * MADV_COLLAPSE, which clears the pmd and RCU-frees the PTE page.
@@ -383,48 +422,61 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 		 * that serialises a zap of this PTE. 64-bit arches have no highmem,
 		 * so pte_offset_kernel() needs no kmap.
 		 */
-		pml = pmd_lock(mm, pmd);
+		spinlock_t *pmd_ptl = pmd_lock(mut_mm_nullable, pmd);
+
 		pmde = pmdp_get(pmd);
-		if (pmd_none(pmde) || pmd_leaf(pmde) || pmd_bad(pmde)) {
-			spin_unlock(pml);
+		if (pmd_none(pmde) != 0 || pmd_leaf(pmde) || pmd_bad(pmde) != 0) {
+			spin_unlock(pmd_ptl);
 			return "PMD changed during walk (collapse race)";
 		}
-		ptl = pte_lockptr(mm, pmd);
-		if (ptl != pml)
+
+		spinlock_t *ptl = pte_lockptr(mut_mm_nullable, pmd);
+
+		if (ptl != pmd_ptl) {
 			spin_lock_nested(ptl, SINGLE_DEPTH_NESTING);
-		pte = pte_offset_kernel(pmd, vaddr);
+		}
+
+		pte_t *pte = pte_offset_kernel(pmd, vaddr);
+
 		pte_entry = ptep_get(pte);
 		/* Read back the PTE slot while the lock still pins the table. */
-		res->pte_readback = read_entry_phys(res->pte_base_phys + res->pte_idx * ENTRY_SIZE);
-		if (pte_present(pte_entry))
-			*pin = pw_pin_frame(PFN_PHYS(pte_pfn(pte_entry)));
-		if (ptl != pml)
+		mut_res->pte_readback = read_entry_phys(mut_res->pte_base_phys +
+							(mut_res->pte_idx * ENTRY_SIZE));
+		if (pte_present(pte_entry) != 0) {
+			*mut_pin = pw_pin_frame(PFN_PHYS(pte_pfn(pte_entry)));
+		}
+		if (ptl != pmd_ptl) {
 			spin_unlock(ptl);
-		spin_unlock(pml);
+		}
+		spin_unlock(pmd_ptl);
 	} else {
 		/* Kernel walk: no collapse race, so read the leaf table directly. */
-		pte = pte_offset_kernel(pmd, vaddr);
-		pte_entry = ptep_get(pte);
-		res->pte_readback = read_entry_phys(res->pte_base_phys + res->pte_idx * ENTRY_SIZE);
-		if (pte_present(pte_entry)) {
-			pte_t cur;
+		pte_t *pte = pte_offset_kernel(pmd, vaddr);
 
-			*pin = pw_pin_frame(PFN_PHYS(pte_pfn(pte_entry)));
-			cur = ptep_get(pte);
-			if (!pte_present(cur) || pte_pfn(cur) != pte_pfn(pte_entry))
-				pw_unpin(pin);
+		pte_entry = ptep_get(pte);
+		mut_res->pte_readback = read_entry_phys(mut_res->pte_base_phys +
+							(mut_res->pte_idx * ENTRY_SIZE));
+		if (pte_present(pte_entry) != 0) {
+			*mut_pin = pw_pin_frame(PFN_PHYS(pte_pfn(pte_entry)));
+
+			pte_t cur = ptep_get(pte);
+
+			if (pte_present(cur) == 0 || pte_pfn(cur) != pte_pfn(pte_entry)) {
+				pw_unpin(mut_pin);
+			}
 		}
 	}
 
-	res->pte_val = pte_val(pte_entry);
+	mut_res->pte_val = pte_val(pte_entry);
 
 	/*
 	 * Only a present entry maps real RAM. A non-none, non-present PTE is a
 	 * swap / migration entry whose bits are NOT a PFN; pte_present() also
 	 * keeps genuine PROT_NONE / NUMA-balancing pages (resident) as valid.
 	 */
-	if (!pte_present(pte_entry))
+	if (pte_present(pte_entry) == 0) {
 		return "PTE not present (swapped out or unmapped)";
+	}
 
 	/*
 	 * pte_leaf_size() returns the base granule for an ordinary 4K PTE, but the
@@ -433,74 +485,12 @@ const char *pw_walk_levels(struct mm_struct *mm, pgd_t *pgd_root,
 	 * so a contiguous mapping resolves the correct physical address even when
 	 * the target offset lies above the base granule.
 	 */
-	{
-		u64 sz = pte_leaf_size(pte_entry);
+	u64 size = pte_leaf_size(pte_entry);
 
-		set_leaf(res, vaddr, PFN_PHYS(pte_pfn(pte_entry)), sz,
-			 PW_LEAF_PTE, sz != PAGE_SIZE);
-		read_physical_content(res, *pin, mm != NULL);
-		return (sz != PAGE_SIZE) ? "mapped via PTE contiguous page"
-					 : "mapped via PTE 4K page";
-	}
-}
-
-int perform_page_walk(pid_t pid, struct pagewalker_result *res)
-{
-	struct task_struct *task;
-	struct mm_struct *mm;
-	struct pid *pid_struct;
-	unsigned long vaddr = res->target_vaddr;
-	struct folio *pin;
-	const char *reason;
-
-	/* Validate the request before acquiring any process resources. */
-	if (pid <= 0 || pid >= PID_MAX_LIMIT) {
-		pr_info_ratelimited("pid %d: rejected (pid out of range)\n", pid);
-		return -EINVAL;
-	}
-
-	pw_set_geometry(res);
-
-	if (!arch_addr_representable(vaddr, res->va_bits)) {
-		pr_info_ratelimited("pid %d vaddr 0x%lx: rejected (non-canonical address)\n",
-				    pid, vaddr);
-		return -EADDRNOTAVAIL;
-	}
-
-	pid_struct = find_get_pid(pid);
-	if (!pid_struct) {
-		pr_info_ratelimited("pid %d: rejected (no such process)\n", pid);
-		return -ESRCH;
-	}
-
-	task = get_pid_task(pid_struct, PIDTYPE_PID);
-	put_pid(pid_struct);
-	if (!task) {
-		pr_info_ratelimited("pid %d: rejected (task exited)\n", pid);
-		return -ESRCH;
-	}
-
-	mm = get_task_mm(task);
-	put_task_struct(task);
-	if (!mm) {
-		pr_info_ratelimited("pid %d: rejected (no mm: kernel thread or exiting)\n", pid);
-		return -ESRCH; /* kernel thread or exiting task: no mm */
-	}
-
-	mmap_read_lock(mm);
-	reason = pw_walk_levels(mm, mm->pgd, res, &pin);
-
-	if (res->is_valid)
-		pr_info_ratelimited("pid %d vaddr 0x%lx -> phys 0x%llx [%s]\n",
-				    pid, vaddr, res->final_phys_addr, reason);
-	else
-		pr_info_ratelimited("pid %d vaddr 0x%lx: walk stopped [%s]\n",
-				    pid, vaddr, reason);
-
-	mmap_read_unlock(mm);
-	pw_unpin(&pin);
-	mmput(mm);
-	return 0;
+	set_leaf(mut_res, vaddr, PFN_PHYS(pte_pfn(pte_entry)), size, PW_LEAF_PTE,
+		 size != PAGE_SIZE);
+	read_physical_content(mut_res, *mut_pin, mut_mm_nullable != NULL);
+	return (size != PAGE_SIZE) ? "mapped via PTE contiguous page" : "mapped via PTE 4K page";
 }
 
 /*
@@ -509,44 +499,40 @@ int perform_page_walk(pid_t pid, struct pagewalker_result *res)
  * no mm lock. Kernel mappings for text / rodata / linear map / page tables are
  * stable, so this is safe; a bogus address folds to an empty entry and stops.
  */
-int perform_kernel_walk(struct pagewalker_result *res)
+static int perform_kernel_walk(struct pagewalker_result *const mut_res)
 {
-	unsigned long vaddr = res->target_vaddr;
-	pgd_t *root = arch_kernel_pgd();
-	struct folio *pin;
-	const char *reason;
+	pgd_t *root = pw_arch_get_kernel_pgd();
 
-	pw_set_geometry(res);
-	if (!root) {
-		res->is_valid = 0;
+	pw_set_geometry(mut_res);
+
+	unsigned long vaddr = mut_res->target_vaddr;
+
+	if (root == NULL) {
+		mut_res->is_valid = 0;
 		pr_info_ratelimited("kernel vaddr 0x%lx: rejected (kernel walk unsupported on this arm64 PA config)\n",
 				    vaddr);
 		return 0;
 	}
-	if ((long)arch_untag_addr(vaddr) >= 0) {
-		res->is_valid = 0;
+	if ((long)pw_arch_untag_addr(vaddr) >= 0) {
+		mut_res->is_valid = 0;
 		pr_info_ratelimited("kernel vaddr 0x%lx: rejected (not a kernel address)\n", vaddr);
 		return -EADDRNOTAVAIL;
 	}
-	reason = pw_walk_levels(NULL, root, res, &pin);
+
+	struct folio *pin;
+	const char *reason = pw_walk_levels(mut_res, &pin, NULL, root);
+
 	pw_unpin(&pin);
 
-	if (res->is_valid)
+	if (mut_res->is_valid != 0) {
 		pr_info_ratelimited("kernel vaddr 0x%lx -> phys 0x%llx [%s]\n",
-				    vaddr, res->final_phys_addr, reason);
-	else
+				    vaddr, mut_res->final_phys_addr, reason);
+	} else {
 		pr_info_ratelimited("kernel vaddr 0x%lx: walk stopped [%s]\n",
 				    vaddr, reason);
+	}
 	return 0;
 }
-
-/* ------------------------------------------------------------------------- *
- * Bulk read (command 2)
- *
- * Layered on the walk above: copy a run of bytes out of a target address
- * space by re-walking each page (frames are contiguous only within a leaf)
- * and vetting every frame as System RAM before touching it.
- * ------------------------------------------------------------------------- */
 
 /*
  * Is this physical frame ordinary System RAM? page_is_ram() consults the iomem
@@ -555,64 +541,132 @@ int perform_kernel_walk(struct pagewalker_result *res)
  * side effect, which is the one "irreversible" hazard a memory dump must not
  * trigger blindly. The caller opts back in with PW_READ_F_ALLOW_MMIO.
  */
-static bool phys_is_ram(u64 phys)
+static bool is_system_ram(u64 phys)
 {
-	return page_is_ram(PHYS_PFN(phys));
+	return page_is_ram(PHYS_PFN(phys)) != 0;
+}
+
+int perform_page_walk(struct pagewalker_result *const mut_res, pid_t pid)
+{
+	/* Validate the request before acquiring any process resources. */
+	if (pid <= 0 || (unsigned long)pid >= PID_MAX_LIMIT) {
+		pr_info_ratelimited("pid %d: rejected (pid out of range)\n", pid);
+		return -EINVAL;
+	}
+
+	pw_set_geometry(mut_res);
+
+	unsigned long vaddr = mut_res->target_vaddr;
+
+	if (!pw_arch_is_addr_representable(vaddr, mut_res->va_bits)) {
+		pr_info_ratelimited("pid %d vaddr 0x%lx: rejected (non-canonical address)\n",
+				    pid, vaddr);
+		return -EADDRNOTAVAIL;
+	}
+
+	struct pid *pid_struct = find_get_pid(pid);
+	if (pid_struct == NULL) {
+		pr_info_ratelimited("pid %d: rejected (no such process)\n", pid);
+		return -ESRCH;
+	}
+
+	struct task_struct *task = get_pid_task(pid_struct, PIDTYPE_PID);
+
+	put_pid(pid_struct);
+	pid_struct = NULL;
+	if (task == NULL) {
+		pr_info_ratelimited("pid %d: rejected (task exited)\n", pid);
+		return -ESRCH;
+	}
+
+	struct mm_struct *mm = get_task_mm(task);
+
+	put_task_struct(task);
+	task = NULL;
+	if (mm == NULL) {
+		pr_info_ratelimited("pid %d: rejected (no mm: kernel thread or exiting)\n", pid);
+		return -ESRCH;
+	}
+
+	mmap_read_lock(mm);
+
+	struct folio *pin;
+	const char *reason = pw_walk_levels(mut_res, &pin, mm, mm->pgd);
+
+	if (mut_res->is_valid != 0) {
+		pr_info_ratelimited("pid %d vaddr 0x%lx -> phys 0x%llx [%s]\n",
+				    pid, vaddr, mut_res->final_phys_addr, reason);
+	} else {
+		pr_info_ratelimited("pid %d vaddr 0x%lx: walk stopped [%s]\n",
+				    pid, vaddr, reason);
+	}
+
+	mmap_read_unlock(mm);
+	pw_unpin(&pin);
+	mmput(mm);
+	mm = NULL;
+	return 0;
 }
 
 /*
- * Bulk read (command 2). Copy up to rr->size bytes starting at rr->vaddr, from
- * either a process address space (rr->pid) or the kernel (PW_READ_F_KERNEL),
- * into the user buffer rr->ubuf. The run is walked one page at a time because
- * physical frames are contiguous only within a leaf, and every read is
- * fault-tolerant, so an unmapped page or a hole truncates the run instead of
- * faulting. Each page's physical frame is checked against System RAM and a
- * non-RAM (MMIO / reserved) frame is refused unless PW_READ_F_ALLOW_MMIO is set.
- * rr->info is filled with the full walk of the START address.
+ * Bulk read (command 2). Copy up to mut_req->size bytes starting at
+ * mut_req->vaddr, from either a process address space (mut_req->pid) or the
+ * kernel (PW_READ_F_KERNEL), into the user buffer mut_req->ubuf. The run is
+ * walked one page at a time because physical frames are contiguous only within
+ * a leaf, and every read is fault-tolerant, so an unmapped page or a hole
+ * truncates the run instead of faulting. Each page's physical frame is checked
+ * against System RAM and a non-RAM (MMIO / reserved) frame is refused unless
+ * PW_READ_F_ALLOW_MMIO is set. mut_req->info is filled with the full walk of the
+ * START address.
  */
-int perform_read(struct pagewalker_read_request *rr)
+int perform_read(struct pagewalker_read_request *const mut_req)
 {
-	bool kernel = rr->flags & PW_READ_F_KERNEL;
-	bool allow_mmio = rr->flags & PW_READ_F_ALLOW_MMIO;
+	bool is_kernel = (mut_req->flags & PW_READ_F_KERNEL) != 0;
 	struct mm_struct *mm = NULL;
-	pgd_t *kpgd = NULL;
-	void __user *dst = (void __user *)(uintptr_t)rr->ubuf;
-	unsigned long vaddr = rr->vaddr;
-	u64 size = rr->size;
+	unsigned long vaddr = mut_req->vaddr;
+	u64 size = mut_req->size;
 	u64 done = 0;
-	u8 *bounce;
 	int ret = 0;
 
-	rr->bytes_read = 0;
-	rr->stopped = PW_STOP_OK;
-	memset(&rr->info, 0, sizeof(rr->info));
-	rr->info.target_vaddr = vaddr;
+	mut_req->bytes_read = 0;
+	mut_req->stopped = PW_STOP_OK;
+	memset(&mut_req->info, 0, sizeof(mut_req->info));
+	mut_req->info.target_vaddr = vaddr;
 
-	/* Clamp to the per-call ceiling; the CLI loops for a larger dump. A direct
-	 * ioctl caller learns it was clamped via PW_STOP_TOOBIG. */
+	/*
+	 * Clamp to the per-call ceiling; the CLI loops for a larger dump. A direct
+	 * ioctl caller learns it was clamped via PW_STOP_TOOBIG.
+	 */
 	if (size > PW_READ_MAX) {
 		size = PW_READ_MAX;
-		rr->stopped = PW_STOP_TOOBIG;
+		mut_req->stopped = PW_STOP_TOOBIG;
 	}
 
 	/* Resolve the target process address space (kernel mode needs none). */
-	if (!kernel) {
-		struct task_struct *task;
-		struct pid *pid_struct;
-
-		if (rr->pid == 0 || rr->pid >= PID_MAX_LIMIT)
+	if (!is_kernel) {
+		if (mut_req->pid == 0 || mut_req->pid >= PID_MAX_LIMIT) {
 			return -EINVAL;
-		pid_struct = find_get_pid(rr->pid);
-		if (!pid_struct)
+		}
+
+		struct pid *pid_struct = find_get_pid((int)mut_req->pid);
+		if (pid_struct == NULL) {
 			return -ESRCH;
-		task = get_pid_task(pid_struct, PIDTYPE_PID);
+		}
+
+		struct task_struct *task = get_pid_task(pid_struct, PIDTYPE_PID);
+
 		put_pid(pid_struct);
-		if (!task)
+		pid_struct = NULL;
+		if (task == NULL) {
 			return -ESRCH;
+		}
+
 		mm = get_task_mm(task);
 		put_task_struct(task);
-		if (!mm)
+		task = NULL;
+		if (mm == NULL) {
 			return -ESRCH;
+		}
 	}
 
 	/*
@@ -622,81 +676,89 @@ int perform_read(struct pagewalker_read_request *rr)
 	 * kernel read must name the high half: a user-half address would resolve
 	 * through the caller's own tables (x86/riscv) or a bogus TTBR1 index (arm64).
 	 */
-	if (!kernel) {
-		pw_set_geometry(&rr->info);
-		if (!arch_addr_representable(vaddr, rr->info.va_bits)) {
-			rr->stopped = PW_STOP_NONCANON;
-			goto out;
+	if (!is_kernel) {
+		pw_set_geometry(&mut_req->info);
+		if (!pw_arch_is_addr_representable(vaddr, mut_req->info.va_bits)) {
+			mut_req->stopped = PW_STOP_NONCANON;
+			goto out_put_mm;
 		}
-	} else if ((long)arch_untag_addr(vaddr) >= 0) {
-		rr->stopped = PW_STOP_NOTKERNEL;
-		goto out;
+	} else if ((long)pw_arch_untag_addr(vaddr) >= 0) {
+		mut_req->stopped = PW_STOP_NOTKERNEL;
+		goto out_put_mm;
 	}
 
+	pgd_t *kernel_pgd = NULL;
+
 	/* Full walk of the START address, for the report the CLI still prints. */
-	if (kernel) {
-		kpgd = arch_kernel_pgd();
-		if (!kpgd) {
+	if (is_kernel) {
+		kernel_pgd = pw_arch_get_kernel_pgd();
+		if (kernel_pgd == NULL) {
 			ret = -EOPNOTSUPP;
-			goto out;
+			goto out_put_mm;
 		}
-		perform_kernel_walk(&rr->info);
+		perform_kernel_walk(&mut_req->info);
 	} else {
 		struct folio *pin;
 
 		mmap_read_lock(mm);
-		pw_walk_levels(mm, mm->pgd, &rr->info, &pin);
+		pw_walk_levels(&mut_req->info, &pin, mm, mm->pgd);
 		mmap_read_unlock(mm);
 		pw_unpin(&pin);
 	}
 
-	if (size == 0)
-		goto out;
-
-	bounce = kmalloc(PAGE_SIZE, GFP_KERNEL);
-	if (!bounce) {
-		ret = -ENOMEM;
-		goto out;
+	if (size == 0) {
+		goto out_put_mm;
 	}
+
+	u8 *bounce = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (bounce == NULL) {
+		ret = -ENOMEM;
+		goto out_put_mm;
+	}
+
+	bool is_mmio_allowed = (mut_req->flags & PW_READ_F_ALLOW_MMIO) != 0;
+	u8 __user *dst = (u8 __user *)((uintptr_t)mut_req->ubuf);
 
 	while (done < size) {
 		unsigned long cur = vaddr + done;
 		unsigned long pgoff = cur & (PAGE_SIZE - 1);
 		size_t chunk = min_t(u64, size - done, PAGE_SIZE - pgoff);
-		struct pagewalker_result step;
-		struct folio *pin;
-		bool fault;
 
 		/* Resolve this page's frame first, so the RAM gate can vet it. */
-		memset(&step, 0, sizeof(step));
-		step.target_vaddr = cur;
+		struct pagewalker_result step = {
+			.target_vaddr = cur
+		};
+		struct folio *pin;
+
 		pw_set_geometry(&step);
-		if (kernel) {
-			pw_walk_levels(NULL, kpgd, &step, &pin);
+		if (is_kernel) {
+			pw_walk_levels(&step, &pin, NULL, kernel_pgd);
 		} else {
 			mmap_read_lock(mm);
-			pw_walk_levels(mm, mm->pgd, &step, &pin);
+			pw_walk_levels(&step, &pin, mm, mm->pgd);
 			mmap_read_unlock(mm);
 		}
 
-		if (!step.is_valid) {
+		if (step.is_valid == 0) {
 			pw_unpin(&pin);
-			rr->stopped = PW_STOP_UNMAPPED;
+			mut_req->stopped = PW_STOP_UNMAPPED;
 			break;
 		}
-		if (!allow_mmio && !phys_is_ram(step.final_phys_addr)) {
+		if (!is_mmio_allowed && !is_system_ram(step.final_phys_addr)) {
 			pw_unpin(&pin);
-			rr->stopped = PW_STOP_MMIO;
+			mut_req->stopped = PW_STOP_MMIO;
 			break;
 		}
 
-		if (kernel && !phys_is_ram(step.final_phys_addr)) {
+		bool has_faulted;
+
+		if (is_kernel && !is_system_ram(step.final_phys_addr)) {
 			/*
 			 * Non-RAM frame, explicitly allowed: there is no page to pin,
 			 * so read at the kernel VA (ioremap / fixmap); a fault is
 			 * still caught here.
 			 */
-			fault = copy_from_kernel_nofault(bounce, (void *)cur, chunk) != 0;
+			has_faulted = copy_from_kernel_nofault(bounce, (void *)cur, chunk) != 0;
 		} else {
 			/*
 			 * The frame is in the linear map (no highmem on 64-bit), so
@@ -706,19 +768,26 @@ int perform_read(struct pagewalker_read_request *rr)
 			 * read, and copy_from_kernel_nofault keeps a reserved region
 			 * or a hole from faulting.
 			 */
-			fault = !(pin ? pw_pinned_range(pin, step.final_phys_addr, chunk)
-				      : (kernel && pfn_valid(PHYS_PFN(step.final_phys_addr)))) ||
-				copy_from_kernel_nofault(bounce,
-							 phys_to_virt(step.final_phys_addr),
-							 chunk) != 0;
+			bool can_read;
+
+			if (pin != NULL) {
+				can_read = pw_is_range_pinned(pin, step.final_phys_addr, chunk);
+			} else {
+				can_read = is_kernel &&
+					   pfn_valid(PHYS_PFN(step.final_phys_addr)) != 0;
+			}
+			has_faulted = !can_read ||
+				      copy_from_kernel_nofault(bounce,
+							       phys_to_virt(step.final_phys_addr),
+							       chunk) != 0;
 		}
 		pw_unpin(&pin);
-		if (fault) {
-			rr->stopped = PW_STOP_FAULT;
+		if (has_faulted) {
+			mut_req->stopped = PW_STOP_FAULT;
 			break;
 		}
 
-		if (copy_to_user(dst + done, bounce, chunk)) {
+		if (copy_to_user(dst + done, bounce, chunk) != 0) {
 			ret = -EFAULT;
 			break;
 		}
@@ -728,10 +797,13 @@ int perform_read(struct pagewalker_read_request *rr)
 	}
 
 	kfree(bounce);
+	bounce = NULL;
 
-out:
-	rr->bytes_read = done;
-	if (mm)
+out_put_mm:
+	mut_req->bytes_read = done;
+	if (mm != NULL) {
 		mmput(mm);
+		mm = NULL;
+	}
 	return ret;
 }

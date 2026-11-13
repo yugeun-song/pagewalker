@@ -146,7 +146,7 @@ non-canonical edge cases — adapting to any arch, granule and paging depth.
 
 ```
 pagewalker/
-├── include/pagewalker_common.h   # shared ioctl ABI (request / result, macros)
+├── include/pagewalker_common.h   # shared ioctl ABI (request / result, constants)
 ├── kernel/                       # module -> pagewalker.ko
 │   ├── pagewalker_device.c       #   character device + ioctl dispatch (module entry)
 │   ├── walk.c, walk.h            #   page-table walk + bulk read (command 2)
@@ -167,9 +167,8 @@ pagewalker/
 
 The module builds next to its source (Kbuild convention). The CLI and the
 self-test build into `bin/<arch>-linux-<cc>-<mode>/`, with their objects under
-`build/`. Each tree carries its own `.clang-format`:
-`kernel/` follows strict Linux kernel style, while `user/` uses a readable variant
-that keeps braces on every control statement.
+`build/`. Each tree carries its own `.clang-format` for one shared style:
+`kernel/` and `include/` indent with 8-column tabs, `user/` with four spaces.
 
 Source indexes are built on demand and are not part of the default build:
 `make index` writes `tags` (ctags), `cscope.out` and two `compile_commands.json`,
