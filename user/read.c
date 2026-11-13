@@ -63,23 +63,23 @@ int parse_size(unsigned long long *const mut_out, const char *const text_nullabl
     char *end = NULL;
 
     errno = 0;
-    unsigned long long v = strtoull(digits, &end, base);
+    unsigned long long value = strtoull(digits, &end, base);
     if (errno != 0 || end == digits) {
         return -1;
     }
 
-    unsigned long long mult = 1;
+    unsigned long long multiplier = 1;
 
     if (*end != '\0') {
         switch (toupper((unsigned char)*end)) {
         case 'K':
-            mult = 1ULL << 10;
+            multiplier = 1ULL << 10;
             break;
         case 'M':
-            mult = 1ULL << 20;
+            multiplier = 1ULL << 20;
             break;
         case 'G':
-            mult = 1ULL << 30;
+            multiplier = 1ULL << 30;
             break;
         default:
             return -1;
@@ -95,11 +95,11 @@ int parse_size(unsigned long long *const mut_out, const char *const text_nullabl
             return -1;
         }
     }
-    if (v > ULLONG_MAX / mult) { /* overflow */
+    if (value > ULLONG_MAX / multiplier) { /* overflow */
         return -1;
     }
 
-    *mut_out = v * mult;
+    *mut_out = value * multiplier;
     return 0;
 }
 
@@ -118,12 +118,12 @@ int parse_vaddr(unsigned long long *const mut_out, const char *const text_nullab
     char *end = NULL;
 
     errno = 0;
-    unsigned long long v = strtoull(text_nullable, &end, BASE_HEX);
+    unsigned long long value = strtoull(text_nullable, &end, BASE_HEX);
     if (errno != 0 || *end != '\0' || end == text_nullable) {
         return -1;
     }
 
-    *mut_out = v;
+    *mut_out = value;
     return 0;
 }
 
@@ -136,36 +136,36 @@ int do_read(unsigned char *const mut_buf_nullable, unsigned long long *const mut
     int has_info = 0;
 
     do {
-        struct pagewalker_read_request rr;
+        struct pagewalker_read_request request;
         unsigned long long chunk = size - done;
 
         if (chunk > PW_READ_MAX) {
             chunk = PW_READ_MAX;
         }
 
-        memset(&rr, 0, sizeof(rr));
-        rr.pid = pid;
-        rr.flags = ((is_kernel != 0) ? PW_READ_F_KERNEL : 0) |
-                   ((is_mmio_allowed != 0) ? PW_READ_F_ALLOW_MMIO : 0);
-        rr.vaddr = start + done;
-        rr.size = chunk;
+        memset(&request, 0, sizeof(request));
+        request.pid = pid;
+        request.flags = ((is_kernel != 0) ? PW_READ_F_KERNEL : 0) |
+                        ((is_mmio_allowed != 0) ? PW_READ_F_ALLOW_MMIO : 0);
+        request.vaddr = start + done;
+        request.size = chunk;
         if (mut_buf_nullable != NULL) {
-            rr.ubuf = (unsigned long long)((uintptr_t)(mut_buf_nullable + done));
+            request.ubuf = (unsigned long long)((uintptr_t)(mut_buf_nullable + done));
         }
 
-        if (ioctl(fd, PAGEWALKER_IOC_READ, &rr) < 0) {
+        if (ioctl(fd, PAGEWALKER_IOC_READ, &request) < 0) {
             *mut_got = done; /* report bytes already copied before the failure */
             return -errno;
         }
 
         if (has_info == 0) {
-            *mut_info = rr.info;
+            *mut_info = request.info;
             has_info = 1;
         }
-        done += rr.bytes_read;
-        *mut_stopped = rr.stopped;
+        done += request.bytes_read;
+        *mut_stopped = request.stopped;
 
-        if (rr.bytes_read < chunk) { /* truncated by a hole / unmapped */
+        if (request.bytes_read < chunk) { /* truncated by a hole / unmapped */
             break;
         }
     } while (done < size);

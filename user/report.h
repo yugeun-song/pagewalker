@@ -39,7 +39,7 @@ int build_report(char *const mut_buf, const struct pagewalker_result *const res,
                  int is_kernel_mode);
 
 /* Short name of the page-table level that held the final leaf entry. */
-const char *get_leaf_level_name(unsigned int lvl);
+const char *get_leaf_level_name(unsigned int level);
 
 /* Format a byte count as an exact binary-unit string (e.g. "2 MiB", "64 KiB"). */
 void format_human_size(char *const mut_out, size_t cap, unsigned long long bytes);

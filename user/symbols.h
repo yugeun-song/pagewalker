@@ -16,7 +16,7 @@ int resolve_ksym(unsigned long long *const mut_out, const char *const arg);
  * userspace. Returns 0 on success, or fills mut_errbuf and returns non-zero
  * (1 = not resolvable, 2 = /proc/pid/maps unreadable).
  */
-int resolve_user_sym(unsigned long long *const mut_out, char *const mut_errbuf, size_t errcap,
+int resolve_user_sym(unsigned long long *const mut_out, char *const mut_errbuf, size_t errbuf_size,
                      unsigned int pid, const char *const name);
 
 #endif /* USER_SYMBOLS_H */

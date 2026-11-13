@@ -58,7 +58,7 @@ struct addr_field {
     char bits[24];
     const char *name;
     unsigned long long val;
-    int nbits;
+    int bit_count;
 };
 
 /* One walked level: name + the values the kernel reported for it. */
@@ -73,13 +73,13 @@ struct level_info {
     int is_pte;
 };
 
-/* Append `s` to mut_out[pos], not exceeding cap; returns the new length. */
-static int append_str(char *const mut_out, int pos, int cap, const char *const s)
+/* Append `text` to mut_out[pos], not exceeding cap; returns the new length. */
+static int append_str(char *const mut_out, int pos, int cap, const char *const text)
 {
     int i = 0;
 
-    while (s[i] != '\0' && pos < cap - 1) {
-        mut_out[pos] = s[i];
+    while (text[i] != '\0' && pos < cap - 1) {
+        mut_out[pos] = text[i];
         ++pos;
         ++i;
     }
@@ -97,16 +97,16 @@ static int __attribute__((format(printf, 3, 4))) append_formatted(char *const mu
     va_list ap;
 
     va_start(ap, fmt);
-    int n = vsnprintf(mut_out, (size_t)cap, fmt, ap);
+    int length = vsnprintf(mut_out, (size_t)cap, fmt, ap);
     va_end(ap);
-    if (n < 0) {
+    if (length < 0) {
         mut_out[0] = '\0';
         return 0;
     }
-    if (n >= cap) {
+    if (length >= cap) {
         return cap - 1;
     }
-    return n;
+    return length;
 }
 
 /* One-line description of the root translation register for this arch. */
@@ -125,16 +125,17 @@ static void describe_root_reg(char *const mut_out, size_t cap,
                  "TTBR0_EL1 = user (low-half) translation base; TTBR1_EL1 holds the kernel (high-half) base.");
     }
 #elif defined(__riscv)
-    int sv = 39;
+    int va_bits = 39;
 
     if (res->paging_level == PAGING_LEVEL_5) {
-        sv = 57;
+        va_bits = 57;
     } else if (res->paging_level == PAGING_LEVEL_4) {
-        sv = 48;
+        va_bits = 48;
     }
     snprintf(mut_out, cap,
              "satp: MODE=Sv%d, root PPN=0x%llx (phys >> %u); one root for the whole address space.",
-             sv, (unsigned long long)(res->root_table_phys >> res->page_shift), res->page_shift);
+             va_bits, (unsigned long long)(res->root_table_phys >> res->page_shift),
+             res->page_shift);
 #endif /* defined(__x86_64__) */
 }
 
@@ -157,144 +158,144 @@ static const char *get_root_reg_name(int is_kernel)
  */
 #if defined(__x86_64__)
 
-static void decode_pte_flags(char *const mut_out, int cap, unsigned long long e,
+static void decode_pte_flags(char *const mut_out, int cap, unsigned long long entry,
                              int is_huge_capable, int is_pte)
 {
-    int is_leaf = is_pte != 0 || (is_huge_capable != 0 && (e & PTE_PSE) != 0);
-    int p = 0;
+    int is_leaf = is_pte != 0 || (is_huge_capable != 0 && (entry & PTE_PSE) != 0);
+    int len = 0;
 
     mut_out[0] = '\0';
-    p = append_str(mut_out, p, cap, "P");
-    p = append_str(mut_out, p, cap, ((e & PTE_RW) != 0) ? " RW" : " RO");
-    p = append_str(mut_out, p, cap, ((e & PTE_USER) != 0) ? " U" : " S");
+    len = append_str(mut_out, len, cap, "P");
+    len = append_str(mut_out, len, cap, ((entry & PTE_RW) != 0) ? " RW" : " RO");
+    len = append_str(mut_out, len, cap, ((entry & PTE_USER) != 0) ? " U" : " S");
 
-    if ((e & PTE_ACCESSED) != 0) {
-        p = append_str(mut_out, p, cap, " A");
+    if ((entry & PTE_ACCESSED) != 0) {
+        len = append_str(mut_out, len, cap, " A");
     }
-    if (is_leaf != 0 && (e & PTE_DIRTY) != 0) {
-        p = append_str(mut_out, p, cap, " D");
+    if (is_leaf != 0 && (entry & PTE_DIRTY) != 0) {
+        len = append_str(mut_out, len, cap, " D");
     }
-    if ((e & PTE_PWT) != 0) {
-        p = append_str(mut_out, p, cap, " PWT");
+    if ((entry & PTE_PWT) != 0) {
+        len = append_str(mut_out, len, cap, " PWT");
     }
-    if ((e & PTE_PCD) != 0) {
-        p = append_str(mut_out, p, cap, " PCD");
+    if ((entry & PTE_PCD) != 0) {
+        len = append_str(mut_out, len, cap, " PCD");
     }
-    if ((e & PTE_GLOBAL) != 0) {
-        p = append_str(mut_out, p, cap, " G");
+    if ((entry & PTE_GLOBAL) != 0) {
+        len = append_str(mut_out, len, cap, " G");
     }
-    if (is_huge_capable != 0 && (e & PTE_PSE) != 0) {
-        p = append_str(mut_out, p, cap, " PS");
+    if (is_huge_capable != 0 && (entry & PTE_PSE) != 0) {
+        len = append_str(mut_out, len, cap, " PS");
     }
-    if (is_pte != 0 && (e & PTE_PSE) != 0) {
-        p = append_str(mut_out, p, cap, " PAT");
+    if (is_pte != 0 && (entry & PTE_PSE) != 0) {
+        len = append_str(mut_out, len, cap, " PAT");
     }
 
-    p = append_str(mut_out, p, cap, ((e & PTE_NX) != 0) ? " NX" : " X");
+    len = append_str(mut_out, len, cap, ((entry & PTE_NX) != 0) ? " NX" : " X");
 }
 
 #elif defined(__aarch64__)
 
-static void decode_pte_flags(char *const mut_out, int cap, unsigned long long e,
+static void decode_pte_flags(char *const mut_out, int cap, unsigned long long entry,
                              int is_huge_capable, int is_pte)
 {
-    int p = 0;
+    int len = 0;
 
     mut_out[0] = '\0';
-    p = append_str(mut_out, p, cap, "V");
+    len = append_str(mut_out, len, cap, "V");
 
-    char ai[16];
+    char field_text[16];
 
-    if (is_pte == 0 && (e & A64_TABLE) != 0) {
-        unsigned apt = (unsigned)((e & A64_TABLE_AP_MASK) >> A64_TABLE_AP_SHIFT);
+    if (is_pte == 0 && (entry & A64_TABLE) != 0) {
+        unsigned ap_table_bits = (unsigned)((entry & A64_TABLE_AP_MASK) >> A64_TABLE_AP_SHIFT);
 
-        p = append_str(mut_out, p, cap, " TABLE");
-        if ((e & A64_TABLE_NS) != 0) {
-            p = append_str(mut_out, p, cap, " NSTable");
+        len = append_str(mut_out, len, cap, " TABLE");
+        if ((entry & A64_TABLE_NS) != 0) {
+            len = append_str(mut_out, len, cap, " NSTable");
         }
-        if (apt != 0) {
-            snprintf(ai, sizeof(ai), " APTable=%u", apt);
-            p = append_str(mut_out, p, cap, ai);
+        if (ap_table_bits != 0) {
+            snprintf(field_text, sizeof(field_text), " APTable=%u", ap_table_bits);
+            len = append_str(mut_out, len, cap, field_text);
         }
-        if ((e & A64_TABLE_UXN) != 0) {
-            p = append_str(mut_out, p, cap, " UXNTable");
+        if ((entry & A64_TABLE_UXN) != 0) {
+            len = append_str(mut_out, len, cap, " UXNTable");
         }
-        if ((e & A64_TABLE_PXN) != 0) {
-            p = append_str(mut_out, p, cap, " PXNTable");
+        if ((entry & A64_TABLE_PXN) != 0) {
+            len = append_str(mut_out, len, cap, " PXNTable");
         }
         return;
     }
-    p = append_str(mut_out, p, cap, ((e & A64_RDONLY) != 0) ? " RO" : " RW");
-    p = append_str(mut_out, p, cap, ((e & A64_USER) != 0) ? " U" : " S");
-    if ((e & A64_AF) != 0) {
-        p = append_str(mut_out, p, cap, " AF");
+    len = append_str(mut_out, len, cap, ((entry & A64_RDONLY) != 0) ? " RO" : " RW");
+    len = append_str(mut_out, len, cap, ((entry & A64_USER) != 0) ? " U" : " S");
+    if ((entry & A64_AF) != 0) {
+        len = append_str(mut_out, len, cap, " AF");
     }
-    p = append_str(mut_out, p, cap, ((e & A64_NG) != 0) ? " nG" : " G");
+    len = append_str(mut_out, len, cap, ((entry & A64_NG) != 0) ? " nG" : " G");
 
-    unsigned sh = (unsigned)((e & A64_SH_MASK) >> A64_SH_SHIFT);
+    unsigned sh_bits = (unsigned)((entry & A64_SH_MASK) >> A64_SH_SHIFT);
     const char *shareability = " SH?";
 
-    if (sh == 3) {
+    if (sh_bits == 3) {
         shareability = " ISH";
-    } else if (sh == 2) {
+    } else if (sh_bits == 2) {
         shareability = " OSH";
-    } else if (sh == 0) {
+    } else if (sh_bits == 0) {
         shareability = " NSH";
     }
-    p = append_str(mut_out, p, cap, shareability);
-    if ((e & A64_CONT) != 0) {
-        p = append_str(mut_out, p, cap, " Cont");
+    len = append_str(mut_out, len, cap, shareability);
+    if ((entry & A64_CONT) != 0) {
+        len = append_str(mut_out, len, cap, " Cont");
     }
-    if ((e & A64_DBM) != 0) {
-        p = append_str(mut_out, p, cap, " DBM");
+    if ((entry & A64_DBM) != 0) {
+        len = append_str(mut_out, len, cap, " DBM");
     }
-    p = append_str(mut_out, p, cap, ((e & A64_PXN) != 0) ? " PXN" : " PX");
-    p = append_str(mut_out, p, cap, ((e & A64_UXN) != 0) ? " UXN" : " UX");
-    snprintf(ai, sizeof(ai), " AI=%u",
-             (unsigned)((e & A64_ATTRINDX_MASK) >> A64_ATTRINDX_SHIFT));
-    p = append_str(mut_out, p, cap, ai);
-    if (is_huge_capable != 0 && (e & A64_TABLE) == 0) {
-        p = append_str(mut_out, p, cap, " BLK");
+    len = append_str(mut_out, len, cap, ((entry & A64_PXN) != 0) ? " PXN" : " PX");
+    len = append_str(mut_out, len, cap, ((entry & A64_UXN) != 0) ? " UXN" : " UX");
+    snprintf(field_text, sizeof(field_text), " AI=%u",
+             (unsigned)((entry & A64_ATTRINDX_MASK) >> A64_ATTRINDX_SHIFT));
+    len = append_str(mut_out, len, cap, field_text);
+    if (is_huge_capable != 0 && (entry & A64_TABLE) == 0) {
+        len = append_str(mut_out, len, cap, " BLK");
     }
 }
 
 #elif defined(__riscv)
 
-static void decode_pte_flags(char *const mut_out, int cap, unsigned long long e,
+static void decode_pte_flags(char *const mut_out, int cap, unsigned long long entry,
                              int is_huge_capable, int is_pte)
 {
-    int p = 0;
+    int len = 0;
 
     mut_out[0] = '\0';
-    p = append_str(mut_out, p, cap, "V");
-    if ((e & RV_R) != 0) {
-        p = append_str(mut_out, p, cap, " R");
+    len = append_str(mut_out, len, cap, "V");
+    if ((entry & RV_R) != 0) {
+        len = append_str(mut_out, len, cap, " R");
     }
-    if ((e & RV_W) != 0) {
-        p = append_str(mut_out, p, cap, " W");
+    if ((entry & RV_W) != 0) {
+        len = append_str(mut_out, len, cap, " W");
     }
-    if ((e & RV_X) != 0) {
-        p = append_str(mut_out, p, cap, " X");
+    if ((entry & RV_X) != 0) {
+        len = append_str(mut_out, len, cap, " X");
     }
-    p = append_str(mut_out, p, cap, ((e & RV_U) != 0) ? " U" : " S");
-    if ((e & RV_G) != 0) {
-        p = append_str(mut_out, p, cap, " G");
+    len = append_str(mut_out, len, cap, ((entry & RV_U) != 0) ? " U" : " S");
+    if ((entry & RV_G) != 0) {
+        len = append_str(mut_out, len, cap, " G");
     }
-    if ((e & RV_A) != 0) {
-        p = append_str(mut_out, p, cap, " A");
+    if ((entry & RV_A) != 0) {
+        len = append_str(mut_out, len, cap, " A");
     }
-    if ((e & RV_D) != 0) {
-        p = append_str(mut_out, p, cap, " D");
+    if ((entry & RV_D) != 0) {
+        len = append_str(mut_out, len, cap, " D");
     }
     /* No R/W/X set means this is a pointer to the next table, not a leaf. */
-    if ((e & (RV_R | RV_W | RV_X)) == 0) {
-        p = append_str(mut_out, p, cap, " (table)");
+    if ((entry & (RV_R | RV_W | RV_X)) == 0) {
+        len = append_str(mut_out, len, cap, " (table)");
     } else {
-        if ((e & RV_NAPOT) != 0) {
-            p = append_str(mut_out, p, cap, " NAPOT");
+        if ((entry & RV_NAPOT) != 0) {
+            len = append_str(mut_out, len, cap, " NAPOT");
         }
 
-        unsigned pbmt = (unsigned)((e & RV_PBMT_MASK) >> RV_PBMT_SHIFT);
+        unsigned pbmt = (unsigned)((entry & RV_PBMT_MASK) >> RV_PBMT_SHIFT);
 
         if (pbmt != 0) {
             const char *pbmt_name = " PBMT=?";
@@ -304,7 +305,7 @@ static void decode_pte_flags(char *const mut_out, int cap, unsigned long long e,
             } else if (pbmt == 2) {
                 pbmt_name = " PBMT=IO";
             }
-            p = append_str(mut_out, p, cap, pbmt_name);
+            len = append_str(mut_out, len, cap, pbmt_name);
         }
     }
 }
@@ -378,24 +379,24 @@ static int select_levels(struct level_info *const mut_levels,
     };
     int is_used[5] = { 1, res->paging_level >= PAGING_LEVEL_5,
                        res->paging_level >= PAGING_LEVEL_4, 1, 1 };
-    int n = 0;
+    int count = 0;
 
     for (int i = 0; i < 5; ++i) {
         if (is_used[i] != 0) {
-            mut_levels[n] = all[i];
-            ++n;
+            mut_levels[count] = all[i];
+            ++count;
         }
     }
-    return n;
+    return count;
 }
 
-/* Center `s` within `width` columns; any odd surplus leans to the right. */
-static const char *center(char *const mut_out, size_t outsz, int width, const char *const s)
+/* Center `text` within `width` columns; any odd surplus leans to the right. */
+static const char *center(char *const mut_out, size_t out_size, int width, const char *const text)
 {
-    int len = (int)strlen(s);
+    int len = (int)strlen(text);
 
-    if (len >= width || (size_t)width + 1 > outsz) {
-        snprintf(mut_out, outsz, "%.*s", width, s);
+    if (len >= width || (size_t)width + 1 > out_size) {
+        snprintf(mut_out, out_size, "%.*s", width, text);
         return mut_out;
     }
 
@@ -403,85 +404,86 @@ static const char *center(char *const mut_out, size_t outsz, int width, const ch
     int right = width - len - left;
 
     memset(mut_out, ' ', (size_t)left);
-    memcpy(mut_out + left, s, (size_t)len);
+    memcpy(mut_out + left, text, (size_t)len);
     memset(mut_out + left + len, ' ', (size_t)right);
     mut_out[width] = '\0';
     return mut_out;
 }
 
-/* Fill `mut_out` with `n` copies of `c`, NUL-terminated. */
-static const char *fill(char *const mut_out, int n, char c)
+/* Fill `mut_out` with `count` copies of `fill_char`, NUL-terminated. */
+static const char *fill(char *const mut_out, int count, char fill_char)
 {
     int i;
 
-    for (i = 0; i < n; ++i) {
-        mut_out[i] = c;
+    for (i = 0; i < count; ++i) {
+        mut_out[i] = fill_char;
     }
 
     mut_out[i] = '\0';
     return mut_out;
 }
 
-/* Write the low `nbits` of `val` as '0'/'1' characters, MSB first. */
-static void convert_bits_to_str(char *const mut_out, unsigned long long val, int nbits)
+/* Write the low `bit_count` bits of `val` as '0'/'1' characters, MSB first. */
+static void convert_bits_to_str(char *const mut_out, unsigned long long val, int bit_count)
 {
-    for (int i = 0; i < nbits; ++i) {
-        mut_out[i] = (((val >> (nbits - 1 - i)) & 1ULL) != 0) ? '1' : '0';
+    for (int i = 0; i < bit_count; ++i) {
+        mut_out[i] = (((val >> (bit_count - 1 - i)) & 1ULL) != 0) ? '1' : '0';
     }
 
-    mut_out[nbits] = '\0';
+    mut_out[bit_count] = '\0';
 }
 
 /* Emit a "+---+---+" rule sized to the label column and `col_widths[]`. */
-static int emit_sep(char *const mut_buf, int off, int labelw, const int *const col_widths,
-                    int ncols)
+static int emit_sep(char *const mut_buf, int offset, int label_width, const int *const col_widths,
+                    int column_count)
 {
     char dash[64];
 
-    off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "+%s+", fill(dash, labelw, '-'));
-    for (int i = 0; i < ncols; ++i) {
-        off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "%s+",
-                                fill(dash, col_widths[i], '-'));
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "+%s+",
+                               fill(dash, label_width, '-'));
+    for (int i = 0; i < column_count; ++i) {
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "%s+",
+                                   fill(dash, col_widths[i], '-'));
     }
 
-    off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "\n");
-    return off;
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "\n");
+    return offset;
 }
 
 /* Emit one "| label | cell | cell |" row with every cell centered. */
-static int emit_row(char *const mut_buf, int off, const char *const label, int labelw,
-                    const char *const *const cells, const int *const col_widths, int ncols)
+static int emit_row(char *const mut_buf, int offset, const char *const label, int label_width,
+                    const char *const *const cells, const int *const col_widths, int column_count)
 {
-    char tmp[64];
+    char centered[64];
 
-    off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "|%s|",
-                            center(tmp, sizeof(tmp), labelw, label));
-    for (int i = 0; i < ncols; ++i) {
-        off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "%s|",
-                                center(tmp, sizeof(tmp), col_widths[i], cells[i]));
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "|%s|",
+                               center(centered, sizeof(centered), label_width, label));
+    for (int i = 0; i < column_count; ++i) {
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "%s|",
+                                   center(centered, sizeof(centered), col_widths[i], cells[i]));
     }
-    off += append_formatted(mut_buf + off, BUFFER_SIZE - off, "\n");
-    return off;
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "\n");
+    return offset;
 }
 
 /* Format a byte count as an exact binary-unit string (e.g. "2 MiB", "64 KiB"). */
 void format_human_size(char *const mut_out, size_t cap, unsigned long long bytes)
 {
-    static const char *s_unit[] = { "B", "KiB", "MiB", "GiB", "TiB" };
-    unsigned long long v = bytes;
-    int u = 0;
+    static const char *s_units[] = { "B", "KiB", "MiB", "GiB", "TiB" };
+    unsigned long long value = bytes;
+    int unit = 0;
 
-    while (u < 4 && v >= 1024 && (v % 1024) == 0) {
-        v /= 1024;
-        ++u;
+    while (unit < 4 && value >= 1024 && (value % 1024) == 0) {
+        value /= 1024;
+        ++unit;
     }
-    snprintf(mut_out, cap, "%llu %s", v, s_unit[u]);
+    snprintf(mut_out, cap, "%llu %s", value, s_units[unit]);
 }
 
 /* Short name of the page-table level that held the final leaf entry. */
-const char *get_leaf_level_name(unsigned int lvl)
+const char *get_leaf_level_name(unsigned int level)
 {
-    switch (lvl) {
+    switch (level) {
     case PW_LEAF_PTE:
         return "PTE";
     case PW_LEAF_PMD:
@@ -512,15 +514,15 @@ int build_report(char *const mut_buf, const struct pagewalker_result *const res,
      * not a clean cut at a level boundary) and are called out in words instead.
      */
     int shown_levels = level_count;
-    int offbits = (int)res->page_shift;
+    int offset_bits = (int)res->page_shift;
 
     if (res->is_valid != 0 && res->is_contiguous == 0 && res->mapping_level != PW_LEAF_PTE &&
         res->mapping_level != PW_LEAF_NONE) {
         const char *target = get_leaf_level_name(res->mapping_level);
-        int li;
+        int leaf_index;
 
-        for (li = 0; li < level_count; ++li) {
-            if (strcmp(levels[li].name, target) == 0) {
+        for (leaf_index = 0; leaf_index < level_count; ++leaf_index) {
+            if (strcmp(levels[leaf_index].name, target) == 0) {
                 break;
             }
         }
@@ -530,17 +532,17 @@ int build_report(char *const mut_buf, const struct pagewalker_result *const res,
          * displayed level. Without this the trim is skipped and the report shows
          * spurious empty rows for the never-walked lower levels.
          */
-        if (li >= level_count) {
-            li = 0;
+        if (leaf_index >= level_count) {
+            leaf_index = 0;
         }
         {
-            unsigned long long s = res->page_size;
+            unsigned long long size = res->page_size;
 
-            shown_levels = li + 1;
-            offbits = 0;
-            while (s > 1) {
-                s >>= 1;
-                ++offbits;
+            shown_levels = leaf_index + 1;
+            offset_bits = 0;
+            while (size > 1) {
+                size >>= 1;
+                ++offset_bits;
             }
         }
     }
@@ -580,33 +582,35 @@ int build_report(char *const mut_buf, const struct pagewalker_result *const res,
     snprintf(fields[field_count].bits, sizeof(fields[field_count].bits), "%d-%d", 63, va_bits);
     fields[field_count].name = "Extension";
     fields[field_count].val = (va_bits >= 64) ? 0 : (res->target_vaddr >> va_bits);
-    fields[field_count].nbits = 64 - va_bits;
+    fields[field_count].bit_count = 64 - va_bits;
     ++field_count;
 
     for (int i = 0; i < shown_levels; ++i) {
         int shift = (int)res->page_shift + ((level_count - 1 - i) * idx_bits);
-        int nbits = (i == 0) ? (va_bits - shift_top) : idx_bits;
+        int bit_count = (i == 0) ? (va_bits - shift_top) : idx_bits;
 
         snprintf(fields[field_count].bits, sizeof(fields[field_count].bits), "%d-%d",
-                 shift + nbits - 1, shift);
+                 shift + bit_count - 1, shift);
         fields[field_count].name = levels[i].name;
         fields[field_count].val = levels[i].idx;
-        fields[field_count].nbits = nbits;
+        fields[field_count].bit_count = bit_count;
         ++field_count;
     }
 
-    snprintf(fields[field_count].bits, sizeof(fields[field_count].bits), "%d-%d", offbits - 1, 0);
+    snprintf(fields[field_count].bits, sizeof(fields[field_count].bits), "%d-%d",
+             offset_bits - 1, 0);
     fields[field_count].name = "offset";
-    fields[field_count].val = res->target_vaddr & ((1ULL << offbits) - 1);
-    fields[field_count].nbits = offbits;
+    fields[field_count].val = res->target_vaddr & ((1ULL << offset_bits) - 1);
+    fields[field_count].bit_count = offset_bits;
     ++field_count;
 
-    char hexs[9][16];
-    char raws[9][48];
+    char hex_texts[9][16];
+    char binary_texts[9][48];
 
     for (int i = 0; i < field_count; ++i) {
-        snprintf(hexs[i], sizeof(hexs[i]), "0x%0*llx", (fields[i].nbits + 3) / 4, fields[i].val);
-        convert_bits_to_str(raws[i], fields[i].val, fields[i].nbits);
+        snprintf(hex_texts[i], sizeof(hex_texts[i]), "0x%0*llx", (fields[i].bit_count + 3) / 4,
+                 fields[i].val);
+        convert_bits_to_str(binary_texts[i], fields[i].val, fields[i].bit_count);
     }
 
     /*
@@ -615,39 +619,39 @@ int build_report(char *const mut_buf, const struct pagewalker_result *const res,
      * so the rows stay aligned even though their content sizes differ.
      */
     int col_widths[9];
-    const char *bitscells[9];
-    const char *namecells[9];
-    const char *hexcells[9];
-    const char *bincells[9];
-    int labelw = (int)strlen("Bits") + 2;
+    const char *bits_cells[9];
+    const char *name_cells[9];
+    const char *hex_cells[9];
+    const char *binary_cells[9];
+    int label_width = (int)strlen("Bits") + 2;
 
     for (int i = 0; i < field_count; ++i) {
-        int w = (int)strlen(fields[i].bits);
+        int width = (int)strlen(fields[i].bits);
 
-        if ((int)strlen(fields[i].name) > w) {
-            w = (int)strlen(fields[i].name);
+        if ((int)strlen(fields[i].name) > width) {
+            width = (int)strlen(fields[i].name);
         }
-        if ((int)strlen(hexs[i]) > w) {
-            w = (int)strlen(hexs[i]);
+        if ((int)strlen(hex_texts[i]) > width) {
+            width = (int)strlen(hex_texts[i]);
         }
-        if ((int)strlen(raws[i]) > w) {
-            w = (int)strlen(raws[i]);
+        if ((int)strlen(binary_texts[i]) > width) {
+            width = (int)strlen(binary_texts[i]);
         }
 
-        col_widths[i] = w + 2;
-        bitscells[i] = fields[i].bits;
-        namecells[i] = fields[i].name;
-        hexcells[i] = hexs[i];
-        bincells[i] = raws[i];
+        col_widths[i] = width + 2;
+        bits_cells[i] = fields[i].bits;
+        name_cells[i] = fields[i].name;
+        hex_cells[i] = hex_texts[i];
+        binary_cells[i] = binary_texts[i];
     }
 
-    offset = emit_sep(mut_buf, offset, labelw, col_widths, field_count);
-    offset = emit_row(mut_buf, offset, "Bits", labelw, bitscells, col_widths, field_count);
-    offset = emit_sep(mut_buf, offset, labelw, col_widths, field_count);
-    offset = emit_row(mut_buf, offset, "IDX", labelw, namecells, col_widths, field_count);
-    offset = emit_row(mut_buf, offset, "VAL", labelw, hexcells, col_widths, field_count);
-    offset = emit_row(mut_buf, offset, "BIN", labelw, bincells, col_widths, field_count);
-    offset = emit_sep(mut_buf, offset, labelw, col_widths, field_count);
+    offset = emit_sep(mut_buf, offset, label_width, col_widths, field_count);
+    offset = emit_row(mut_buf, offset, "Bits", label_width, bits_cells, col_widths, field_count);
+    offset = emit_sep(mut_buf, offset, label_width, col_widths, field_count);
+    offset = emit_row(mut_buf, offset, "IDX", label_width, name_cells, col_widths, field_count);
+    offset = emit_row(mut_buf, offset, "VAL", label_width, hex_cells, col_widths, field_count);
+    offset = emit_row(mut_buf, offset, "BIN", label_width, binary_cells, col_widths, field_count);
+    offset = emit_sep(mut_buf, offset, label_width, col_widths, field_count);
     offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "\n");
 
     /*
@@ -656,33 +660,34 @@ int build_report(char *const mut_buf, const struct pagewalker_result *const res,
      * the two rows line up even when a column's widest cell is its name rather
      * than its binary.
      */
-    int binstart[9];
-    int acc = 1 + labelw + 1; /* column where the first cell's content begins */
+    int binary_columns[9];
+    int cell_column = 1 + label_width + 1; /* column where the first cell's content begins */
 
     for (int i = 0; i < field_count; ++i) {
-        int leftpad = (col_widths[i] - (int)strlen(raws[i])) / 2;
+        int left_padding = (col_widths[i] - (int)strlen(binary_texts[i])) / 2;
 
-        binstart[i] = acc + leftpad;
-        acc += col_widths[i] + 1;
+        binary_columns[i] = cell_column + left_padding;
+        cell_column += col_widths[i] + 1;
     }
 
     offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
                                " Target VAddr (64-bit, MSB -> LSB): 0x%016llx\n",
                                res->target_vaddr);
 
-    char sp[96];
-    int cur = binstart[0] - 3; /* leave room for "-> " just before the first group */
+    char spaces[96];
+    int column = binary_columns[0] - 3; /* leave room for "-> " just before the first group */
 
-    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "%s-> ", fill(sp, cur, ' '));
-    cur += 3;
+    offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "%s-> ",
+                               fill(spaces, column, ' '));
+    column += 3;
     for (int i = 0; i < field_count; ++i) {
-        if (binstart[i] > cur) {
+        if (binary_columns[i] > column) {
             offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "%s",
-                                       fill(sp, binstart[i] - cur, ' '));
-            cur = binstart[i];
+                                       fill(spaces, binary_columns[i] - column, ' '));
+            column = binary_columns[i];
         }
-        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "%s", raws[i]);
-        cur += (int)strlen(raws[i]);
+        offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "%s", binary_texts[i]);
+        column += (int)strlen(binary_texts[i]);
     }
     offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset, "\n\n");
 
@@ -691,15 +696,15 @@ int build_report(char *const mut_buf, const struct pagewalker_result *const res,
                                "=== Translation Steps ===\n\n");
 
     /* Step 0: the arch root translation register. */
-    char rdesc[256];
+    char root_description[256];
 
-    describe_root_reg(rdesc, sizeof(rdesc), res, is_kernel_mode);
+    describe_root_reg(root_description, sizeof(root_description), res, is_kernel_mode);
     offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
                                "[Step 0: %s Register]\n", get_root_reg_name(is_kernel_mode));
     offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
                                "  Physical Addr : 0x%llx\n", res->root_table_phys);
     offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
-                               "  Description   : %s\n\n", rdesc);
+                               "  Description   : %s\n\n", root_description);
 
     /* Steps 1..N: one per walked level (down to the leaf for a huge page). */
     for (int i = 0; i < shown_levels; ++i) {
@@ -718,13 +723,13 @@ int build_report(char *const mut_buf, const struct pagewalker_result *const res,
                                "--------------------------------------------------------\n");
 
     if (res->is_valid != 0) {
-        char szs[32];
+        char page_size_text[32];
 
-        format_human_size(szs, sizeof(szs), res->page_size);
+        format_human_size(page_size_text, sizeof(page_size_text), res->page_size);
         offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
                                    "[FINAL RESULT]\n");
         offset += append_formatted(mut_buf + offset, BUFFER_SIZE - offset,
-                                   "  Mapped Page    : %s  (leaf at %s%s%s)\n", szs,
+                                   "  Mapped Page    : %s  (leaf at %s%s%s)\n", page_size_text,
                                    get_leaf_level_name(res->mapping_level),
                                    (res->is_contiguous != 0) ? ", " : "",
                                    (res->is_contiguous != 0) ? PW_CONT_TERM : "");

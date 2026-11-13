@@ -51,15 +51,15 @@ static void print_usage(const char *const prog_name)
 
 static unsigned int get_system_pid_max(void)
 {
-    FILE *f = fopen(PID_MAX_FILE, "r");
+    FILE *file = fopen(PID_MAX_FILE, "r");
     unsigned int max = PID_MAX_FALLBACK;
 
-    if (f != NULL) {
-        if (fscanf(f, "%u", &max) != 1) {
+    if (file != NULL) {
+        if (fscanf(file, "%u", &max) != 1) {
             max = PID_MAX_FALLBACK;
         }
-        fclose(f);
-        f = NULL;
+        fclose(file);
+        file = NULL;
     }
     return max;
 }
@@ -126,25 +126,25 @@ int main(int argc, char *argv[])
             should_skip_report = 1;
             break;
         case 'w': {
-            char *e = NULL;
-            long v = strtol(optarg, &e, 10);
+            char *end = NULL;
+            long value = strtol(optarg, &end, 10);
 
-            if (*e != '\0' || v < 1 || v > 256) {
+            if (*end != '\0' || value < 1 || value > 256) {
                 fprintf(stderr, "Error: --cols must be 1..256.\n");
                 return EXIT_FAILURE;
             }
-            cols = (int)v;
+            cols = (int)value;
             break;
         }
         case 'g': {
-            char *e = NULL;
-            long v = strtol(optarg, &e, 10);
+            char *end = NULL;
+            long value = strtol(optarg, &end, 10);
 
-            if (*e != '\0' || v < 0 || v > 256) {
+            if (*end != '\0' || value < 0 || value > 256) {
                 fprintf(stderr, "Error: --group must be 0..256 (0 = no grouping).\n");
                 return EXIT_FAILURE;
             }
-            group = (int)v;
+            group = (int)value;
             break;
         }
         case 'f':
@@ -165,38 +165,38 @@ int main(int argc, char *argv[])
         }
     }
 
-    int npos = argc - optind;
+    int operand_count = argc - optind;
     unsigned int pid = 0;
     unsigned long long start = 0;
     unsigned long long size = 0;
     int has_size = 0;
 
     if (is_kernel != 0) {
-        if (npos < 1 || npos > 2) {
+        if (operand_count < 1 || operand_count > 2) {
             fprintf(stderr, "Error: expected <symbol|0xaddr> [size].\n");
             return EXIT_FAILURE;
         }
 
-        int r = resolve_ksym(&start, argv[optind]);
-        if (r == 1) {
+        int status = resolve_ksym(&start, argv[optind]);
+        if (status == 1) {
             fprintf(stderr, "Error: symbol '%s' not found in /proc/kallsyms.\n", argv[optind]);
             return EXIT_FAILURE;
         }
-        if (r == 2) {
+        if (status == 2) {
             fprintf(stderr,
                     "Error: '%s' resolves to 0 (kernel.kptr_restrict hides symbol addresses). Run as root; if kptr_restrict=2 even root is blocked, so lower it or pass -k 0x<address> directly.\n",
                     argv[optind]);
             return EXIT_FAILURE;
         }
-        if (r == 3) {
+        if (status == 3) {
             fprintf(stderr, "Error: cannot read /proc/kallsyms.\n");
             return EXIT_FAILURE;
         }
-        if (r == 4) {
+        if (status == 4) {
             fprintf(stderr, "Error: invalid kernel address '%s'.\n", argv[optind]);
             return EXIT_FAILURE;
         }
-        if (npos == 2) {
+        if (operand_count == 2) {
             if (parse_size(&size, argv[optind + 1]) != 0) {
                 fprintf(stderr, "Error: invalid size '%s'.\n", argv[optind + 1]);
                 return EXIT_FAILURE;
@@ -204,11 +204,11 @@ int main(int argc, char *argv[])
             has_size = 1;
         }
     } else {
-        if (npos < 2) {
+        if (operand_count < 2) {
             fprintf(stderr, "Error: too few arguments.\n");
             return EXIT_FAILURE;
         }
-        if (npos > 3) {
+        if (operand_count > 3) {
             fprintf(stderr, "Error: too many arguments.\n");
             return EXIT_FAILURE;
         }
@@ -235,39 +235,39 @@ int main(int argc, char *argv[])
          * kernel only ever sees a (pid, address) pair.
          */
         {
-            const char *tgt = argv[optind + 1];
-            const char *h = tgt;
-            int is_hex = tgt[0] != '\0';
+            const char *target = argv[optind + 1];
+            const char *digits = target;
+            int is_hex = target[0] != '\0';
 
-            if (h[0] == '0' && (h[1] == 'x' || h[1] == 'X')) {
-                h += 2;
+            if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) {
+                digits += 2;
             }
-            if (*h == '\0') {
+            if (*digits == '\0') {
                 is_hex = 0;
             }
-            for (; *h != '\0'; ++h) {
-                if (isxdigit((unsigned char)*h) == 0) {
+            for (; *digits != '\0'; ++digits) {
+                if (isxdigit((unsigned char)*digits) == 0) {
                     is_hex = 0;
                     break;
                 }
             }
 
             if (is_hex != 0) {
-                if (parse_vaddr(&start, tgt) != 0) {
+                if (parse_vaddr(&start, target) != 0) {
                     fprintf(stderr, "Error: Invalid Address.\n");
                     return EXIT_FAILURE;
                 }
             } else {
-                char err[256];
+                char message[256];
 
-                if (resolve_user_sym(&start, err, sizeof(err), pid, tgt) != 0) {
-                    fprintf(stderr, "Error: %s\n", err);
+                if (resolve_user_sym(&start, message, sizeof(message), pid, target) != 0) {
+                    fprintf(stderr, "Error: %s\n", message);
                     return EXIT_FAILURE;
                 }
-                fprintf(stderr, "resolved %s in PID %u -> 0x%llx\n", tgt, pid, start);
+                fprintf(stderr, "resolved %s in PID %u -> 0x%llx\n", target, pid, start);
             }
         }
-        if (npos == 3) {
+        if (operand_count == 3) {
             if (parse_size(&size, argv[optind + 2]) != 0) {
                 fprintf(stderr, "Error: invalid size '%s'.\n", argv[optind + 2]);
                 return EXIT_FAILURE;
@@ -355,10 +355,10 @@ int main(int argc, char *argv[])
             }
         }
 
-        int r = do_read(data, &got, &stopped, &info, fd, is_kernel, is_mmio_allowed, pid, start,
-                        size);
-        if (r < 0) {
-            switch (-r) {
+        int status = do_read(data, &got, &stopped, &info, fd, is_kernel, is_mmio_allowed, pid,
+                             start, size);
+        if (status < 0) {
+            switch (-status) {
             case ESRCH:
                 fprintf(stderr, "Error: PID %u not found.\n", pid);
                 break;
@@ -370,7 +370,7 @@ int main(int argc, char *argv[])
                         "Error: kernel-space walk is not supported on this arm64 configuration (52-bit PA / LPA2).\n");
                 break;
             default:
-                errno = -r;
+                errno = -status;
                 perror("ioctl");
                 break;
             }
@@ -404,15 +404,15 @@ int main(int argc, char *argv[])
                 printf("%s", buf);
             }
             if (size != 0) {
-                char szs[32];
+                char page_size_text[32];
 
-                format_human_size(szs, sizeof(szs), info.page_size);
+                format_human_size(page_size_text, sizeof(page_size_text), info.page_size);
                 printf("\n=== Memory Dump: %llu of %llu byte%s ===\n", got, size,
                        (size == 1) ? "" : "s");
                 printf("  Start VA : 0x%016llx\n", start);
                 if (info.is_valid != 0) {
                     printf("  Start PA : 0x%016llx  (%s leaf at %s%s)\n",
-                           (unsigned long long)info.final_phys_addr, szs,
+                           (unsigned long long)info.final_phys_addr, page_size_text,
                            get_leaf_level_name(info.mapping_level),
                            (info.is_contiguous != 0) ? ", contiguous" : "");
                 }

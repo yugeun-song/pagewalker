@@ -69,12 +69,12 @@ static int load_module(const char *const path)
         return -1;
     }
 
-    long r = syscall(SYS_finit_module, fd, "", 0);
+    long status = syscall(SYS_finit_module, fd, "", 0);
     int saved_errno = errno;
 
     close(fd);
     errno = saved_errno;
-    return (int)r;
+    return (int)status;
 }
 
 /* Best-effort hugetlb pool reservation; a size the arch can't back just fails. */
@@ -121,11 +121,11 @@ static int walk_vaddr(struct pagewalker_result *const mut_out, unsigned long lon
         return -errno;
     }
 
-    int r = ioctl(fd, PAGEWALKER_IOC_GET_INFO, &req);
+    int status = ioctl(fd, PAGEWALKER_IOC_GET_INFO, &req);
     int saved_errno = errno;
 
     close(fd);
-    if (r < 0) {
+    if (status < 0) {
         return -saved_errno;
     }
     *mut_out = req.info;
@@ -152,17 +152,17 @@ static int run_size_case(const char *const name, unsigned long long size, int hu
         return 2;
     }
 
-    unsigned long base = (unsigned long)sysconf(_SC_PAGESIZE);
-    unsigned long long off = (size > base) ? ((size / 2) & ~7ULL) : 0;
-    volatile unsigned long long *probe = (volatile unsigned long long *)((char *)region + off);
+    unsigned long page_size = (unsigned long)sysconf(_SC_PAGESIZE);
+    unsigned long long offset = (size > page_size) ? ((size / 2) & ~7ULL) : 0;
+    volatile unsigned long long *probe = (volatile unsigned long long *)((char *)region + offset);
     unsigned long long sentinel = 0xCAFEBABE00000000ULL ^ size;
 
     *probe = sentinel;
 
     struct pagewalker_result info;
-    int r = walk_vaddr(&info, (unsigned long long)((uintptr_t)probe));
-    if (r < 0) {
-        printf("CASE %-8s FAIL  (ioctl errno=%d)\n", name, -r);
+    int status = walk_vaddr(&info, (unsigned long long)((uintptr_t)probe));
+    if (status < 0) {
+        printf("CASE %-8s FAIL  (ioctl errno=%d)\n", name, -status);
         munmap(region, (size_t)size);
         region = NULL;
         probe = NULL;
@@ -187,18 +187,18 @@ static int run_size_case(const char *const name, unsigned long long size, int hu
 /* Enumerate the kernel's supported hugepage sizes and test each one. */
 static void run_all_hugepages(void)
 {
-    DIR *d = opendir("/sys/kernel/mm/hugepages");
-    if (d == NULL) {
+    DIR *dir = opendir("/sys/kernel/mm/hugepages");
+    if (dir == NULL) {
         printf("CASE huge     SKIP  (no /sys/kernel/mm/hugepages)\n");
         return;
     }
 
     int has_found = 0;
 
-    for (struct dirent *e = readdir(d); e != NULL; e = readdir(d)) {
+    for (struct dirent *entry = readdir(dir); entry != NULL; entry = readdir(dir)) {
         unsigned long kib;
 
-        if (sscanf(e->d_name, "hugepages-%lukB", &kib) != 1) {
+        if (sscanf(entry->d_name, "hugepages-%lukB", &kib) != 1) {
             continue;
         }
         has_found = 1;
@@ -210,8 +210,8 @@ static void run_all_hugepages(void)
         reserve_pool(kib, "4");
         tally(run_size_case(name, size, compute_log2_size(size)));
     }
-    closedir(d);
-    d = NULL;
+    closedir(dir);
+    dir = NULL;
     if (has_found == 0) {
         printf("CASE huge     SKIP  (kernel exposes no hugepage sizes)\n");
     }
@@ -225,43 +225,43 @@ static void run_all_hugepages(void)
  */
 static int run_kernel_read(void)
 {
-    FILE *f = fopen("/proc/kallsyms", "r");
-    if (f == NULL) {
+    FILE *file = fopen("/proc/kallsyms", "r");
+    if (file == NULL) {
         printf("CASE k-text   SKIP  (no /proc/kallsyms)\n");
         return 2;
     }
 
     char line[512];
-    unsigned long long text = 0;
+    unsigned long long text_addr = 0;
 
-    while (fgets(line, sizeof(line), f) != NULL) {
+    while (fgets(line, sizeof(line), file) != NULL) {
         unsigned long long addr;
         char type;
-        char sym[128];
+        char symbol[128];
 
-        if (sscanf(line, "%llx %c %127s", &addr, &type, sym) != 3) {
+        if (sscanf(line, "%llx %c %127s", &addr, &type, symbol) != 3) {
             continue;
         }
-        if (strcmp(sym, "_text") == 0) {
-            text = addr;
+        if (strcmp(symbol, "_text") == 0) {
+            text_addr = addr;
             break;
         }
     }
-    fclose(f);
-    f = NULL;
-    if (text == 0) {
+    fclose(file);
+    file = NULL;
+    if (text_addr == 0) {
         printf("CASE k-text   SKIP  (_text not in kallsyms)\n");
         return 2;
     }
 
-    struct pagewalker_read_request rr;
+    struct pagewalker_read_request request;
     unsigned char buf[64];
 
-    memset(&rr, 0, sizeof(rr));
-    rr.flags = PW_READ_F_KERNEL;
-    rr.vaddr = text;
-    rr.size = sizeof(buf);
-    rr.ubuf = (unsigned long long)((uintptr_t)buf);
+    memset(&request, 0, sizeof(request));
+    request.flags = PW_READ_F_KERNEL;
+    request.vaddr = text_addr;
+    request.size = sizeof(buf);
+    request.ubuf = (unsigned long long)((uintptr_t)buf);
 
     int fd = open(PAGEWALKER_PATH, O_RDWR);
     if (fd < 0) {
@@ -269,11 +269,11 @@ static int run_kernel_read(void)
         return 1;
     }
 
-    int r = ioctl(fd, PAGEWALKER_IOC_READ, &rr);
+    int status = ioctl(fd, PAGEWALKER_IOC_READ, &request);
     int saved_errno = errno;
 
     close(fd);
-    if (r < 0) {
+    if (status < 0) {
         if (saved_errno == EOPNOTSUPP) {
             printf("CASE k-text   PASS  (kernel walk refused: EOPNOTSUPP - safe)\n");
             return 0;
@@ -281,21 +281,21 @@ static int run_kernel_read(void)
         printf("CASE k-text   FAIL  (ioctl errno=%d)\n", saved_errno);
         return 1;
     }
-    if (rr.bytes_read == 0 || rr.stopped != PW_STOP_OK) {
+    if (request.bytes_read == 0 || request.stopped != PW_STOP_OK) {
         printf("CASE k-text   FAIL  (bytes=%llu stopped=%u)\n",
-               (unsigned long long)rr.bytes_read, rr.stopped);
+               (unsigned long long)request.bytes_read, request.stopped);
         return 1;
     }
     printf("CASE k-text   PASS  (read %llu bytes at _text=0x%llx)\n",
-           (unsigned long long)rr.bytes_read, text);
+           (unsigned long long)request.bytes_read, text_addr);
     return 0;
 }
 
 /* Edge: an unmapped address must resolve to "not mapped", not crash. */
 static int run_edge_unmapped(void)
 {
-    unsigned long base = (unsigned long)sysconf(_SC_PAGESIZE);
-    void *region = mmap(NULL, base, PROT_READ | PROT_WRITE,
+    unsigned long page_size = (unsigned long)sysconf(_SC_PAGESIZE);
+    void *region = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (region == MAP_FAILED) {
         printf("CASE unmap    SKIP  (mmap errno=%d)\n", errno);
@@ -304,13 +304,13 @@ static int run_edge_unmapped(void)
 
     unsigned long long vaddr = (unsigned long long)((uintptr_t)region);
 
-    munmap(region, base);
+    munmap(region, page_size);
     region = NULL;
 
     struct pagewalker_result info;
-    int r = walk_vaddr(&info, vaddr);
-    if (r < 0) {
-        printf("CASE unmap    FAIL  (ioctl errno=%d)\n", -r);
+    int status = walk_vaddr(&info, vaddr);
+    if (status < 0) {
+        printf("CASE unmap    FAIL  (ioctl errno=%d)\n", -status);
         return 1;
     }
     if (info.is_valid != 0) {
@@ -325,13 +325,13 @@ static int run_edge_unmapped(void)
 static int run_edge_noncanon(void)
 {
     struct pagewalker_result info;
-    int r = walk_vaddr(&info, 0xDEAD000000000000ULL);
+    int status = walk_vaddr(&info, 0xDEAD000000000000ULL);
 
-    if (r == -EADDRNOTAVAIL) {
+    if (status == -EADDRNOTAVAIL) {
         printf("CASE noncanon PASS  (non-canonical address rejected: EADDRNOTAVAIL)\n");
         return 0;
     }
-    printf("CASE noncanon FAIL  (expected EADDRNOTAVAIL, got r=%d)\n", r);
+    printf("CASE noncanon FAIL  (expected EADDRNOTAVAIL, got r=%d)\n", status);
     return 1;
 }
 
@@ -343,17 +343,17 @@ static int run_edge_noncanon(void)
  */
 static void report_environment(void)
 {
-    unsigned long base = (unsigned long)sysconf(_SC_PAGESIZE);
+    unsigned long page_size = (unsigned long)sysconf(_SC_PAGESIZE);
     struct utsname uts;
 
     printf("== ENVIRONMENT (%s) ==\n", PW_ARCH_NAME);
     if (uname(&uts) == 0) {
         printf("  kernel      : %s %s %s\n", uts.sysname, uts.release, uts.machine);
     }
-    printf("  base page   : %lu bytes\n", base);
+    printf("  base page   : %lu bytes\n", page_size);
 
     int has_geometry = 0;
-    void *region = mmap(NULL, base, PROT_READ | PROT_WRITE,
+    void *region = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
     if (region != MAP_FAILED) {
@@ -368,7 +368,7 @@ static void report_environment(void)
                    (unsigned long long)info.root_table_phys);
             has_geometry = 1;
         }
-        munmap(region, base);
+        munmap(region, page_size);
         region = NULL;
     }
     if (has_geometry == 0) {
@@ -377,21 +377,21 @@ static void report_environment(void)
 
     printf("  hugepages   :");
 
-    DIR *d = opendir("/sys/kernel/mm/hugepages");
-    if (d != NULL) {
-        size_t n = 0;
+    DIR *dir = opendir("/sys/kernel/mm/hugepages");
+    if (dir != NULL) {
+        size_t count = 0;
 
-        for (struct dirent *e = readdir(d); e != NULL; e = readdir(d)) {
+        for (struct dirent *entry = readdir(dir); entry != NULL; entry = readdir(dir)) {
             unsigned long kib;
 
-            if (sscanf(e->d_name, "hugepages-%lukB", &kib) == 1) {
+            if (sscanf(entry->d_name, "hugepages-%lukB", &kib) == 1) {
                 printf(" %luK", kib);
-                ++n;
+                ++count;
             }
         }
-        closedir(d);
-        d = NULL;
-        if (n == 0) {
+        closedir(dir);
+        dir = NULL;
+        if (count == 0) {
             printf(" (none)");
         }
     } else {
@@ -418,13 +418,13 @@ int main(void)
          * would never reach the QEMU serial log.
          */
         {
-            int cfd = open("/dev/console", O_WRONLY);
+            int console_fd = open("/dev/console", O_WRONLY);
 
-            if (cfd >= 0) {
-                dup2(cfd, 1);
-                dup2(cfd, 2);
-                if (cfd > 2) {
-                    close(cfd);
+            if (console_fd >= 0) {
+                dup2(console_fd, 1);
+                dup2(console_fd, 2);
+                if (console_fd > 2) {
+                    close(console_fd);
                 }
             }
         }
@@ -439,9 +439,9 @@ int main(void)
 
     printf("== CAPABILITY CHECKS ==\n");
 
-    unsigned long base = (unsigned long)sysconf(_SC_PAGESIZE);
+    unsigned long page_size = (unsigned long)sysconf(_SC_PAGESIZE);
 
-    tally(run_size_case("base", (unsigned long long)base, 0));
+    tally(run_size_case("base", (unsigned long long)page_size, 0));
     run_all_hugepages();
     tally(run_kernel_read());
     tally(run_edge_unmapped());
