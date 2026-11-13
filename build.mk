@@ -65,7 +65,9 @@ mk_count = $(words $(1)) $(if $(filter 1,$(words $(1))),$(2),$(3))
 MK_HELP_LIST := 10
 MK_HELP_MORE = $(wordlist 11,$(words $(PROGRAMS)),$(PROGRAMS))
 
-MK_INDEX_SRCS := $(or $(INDEX_SRCS),$(shell git ls-files -- '*.c' '*.h' 2> /dev/null))
+MK_INDEX_SRCS := $(or $(INDEX_SRCS),$(shell git ls-files -- '*.c' '*.h' 2> /dev/null),$(patsubst ./%,%,$(shell \
+	find . \( -path './.*' -o -path './$(BIN_DIR)' -o -path './$(BUILD_DIR)' \) -prune -o \
+	\( -name '*.[ch]' ! -name '*.mod.c' \) -print 2> /dev/null | sort)))
 MK_FORMAT_SRCS := $(or $(FORMAT_SRCS),$(MK_INDEX_SRCS))
 MK_INDEX_FILES := compile_commands.json compile_commands.json.tmp tags cscope.files cscope.out \
 	cscope.in.out cscope.po.out
