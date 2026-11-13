@@ -8,9 +8,63 @@
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/slab.h>
+#include <linux/stddef.h>
 #include <linux/uaccess.h>
 
 #include "walk.h"
+
+/*
+ * The command numbers carry the sizes of these structures, and the CLI reads
+ * them field by field, so their layout is frozen and checked here.
+ */
+_Static_assert(sizeof(struct pagewalker_result) == 248, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, target_vaddr) == 0, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, paging_level) == 8, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, page_shift) == 12, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, va_bits) == 16, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, root_table_phys) == 24, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pgd_idx) == 32, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, p4d_idx) == 40, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pud_idx) == 48, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pmd_idx) == 56, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pte_idx) == 64, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, page_offset) == 72, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pgd_val) == 80, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, p4d_val) == 88, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pud_val) == 96, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pmd_val) == 104, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pte_val) == 112, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pgd_readback) == 120, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, p4d_readback) == 128, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pud_readback) == 136, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pmd_readback) == 144, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pte_readback) == 152, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pgd_base_phys) == 160, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, p4d_base_phys) == 168, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pud_base_phys) == 176, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pmd_base_phys) == 184, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, pte_base_phys) == 192, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, page_base_phys) == 200, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, final_phys_addr) == 208, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, page_size) == 216, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, mapping_level) == 224, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, is_contiguous) == 228, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, value_at_phys) == 232, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_result, is_valid) == 240, "pagewalker ABI layout");
+_Static_assert(sizeof(struct pagewalker_request) == 256, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_request, pid) == 0, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_request, padding) == 4, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_request, info) == 8, "pagewalker ABI layout");
+_Static_assert(sizeof(struct pagewalker_read_request) == 296, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_read_request, pid) == 0, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_read_request, flags) == 4, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_read_request, vaddr) == 8, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_read_request, size) == 16, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_read_request, ubuf) == 24, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_read_request, bytes_read) == 32, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_read_request, stopped) == 40, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_read_request, pad) == 44, "pagewalker ABI layout");
+_Static_assert(offsetof(struct pagewalker_read_request, info) == 48, "pagewalker ABI layout");
 
 static int pagewalker_open(struct inode *const inode, struct file *const file);
 static long pagewalker_handle_ioctl(struct file *const file, unsigned int cmd, unsigned long arg);

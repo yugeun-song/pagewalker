@@ -37,6 +37,7 @@
 #include <unistd.h>
 
 #include "../include/pagewalker_common.h"
+#include "abi_layout.h"
 #include "report.h"
 
 #ifndef MAP_HUGETLB
@@ -402,6 +403,8 @@ static void report_environment(void)
 
 int main(void)
 {
+    check_abi_layout();
+
     int is_init = (getpid() == 1);
 
     if (is_init != 0) {

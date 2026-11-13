@@ -14,6 +14,8 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include "abi_layout.h"
+
 static void print_usage(const char *const prog_name)
 {
     fprintf(stderr,
@@ -66,6 +68,8 @@ static unsigned int get_system_pid_max(void)
 
 int main(int argc, char *argv[])
 {
+    check_abi_layout();
+
     int is_kernel = 0;
     int is_forced = 0;
     int is_mmio_allowed = 0;
