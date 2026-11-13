@@ -149,7 +149,9 @@ int do_read(unsigned char *const mut_buf_nullable, unsigned long long *const mut
                    ((is_mmio_allowed != 0) ? PW_READ_F_ALLOW_MMIO : 0);
         rr.vaddr = start + done;
         rr.size = chunk;
-        rr.ubuf = (unsigned long long)(uintptr_t)(mut_buf_nullable + done);
+        if (mut_buf_nullable != NULL) {
+            rr.ubuf = (unsigned long long)((uintptr_t)(mut_buf_nullable + done));
+        }
 
         if (ioctl(fd, PAGEWALKER_IOC_READ, &rr) < 0) {
             *mut_got = done; /* report bytes already copied before the failure */
