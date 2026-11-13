@@ -160,7 +160,7 @@ static int run_size_case(const char *const name, unsigned long long size, int hu
     *probe = sentinel;
 
     struct pagewalker_result info;
-    int r = walk_vaddr(&info, (unsigned long long)(uintptr_t)probe);
+    int r = walk_vaddr(&info, (unsigned long long)((uintptr_t)probe));
     if (r < 0) {
         printf("CASE %-8s FAIL  (ioctl errno=%d)\n", name, -r);
         munmap(region, (size_t)size);
@@ -261,7 +261,7 @@ static int run_kernel_read(void)
     rr.flags = PW_READ_F_KERNEL;
     rr.vaddr = text;
     rr.size = sizeof(buf);
-    rr.ubuf = (unsigned long long)(uintptr_t)buf;
+    rr.ubuf = (unsigned long long)((uintptr_t)buf);
 
     int fd = open(PAGEWALKER_PATH, O_RDWR);
     if (fd < 0) {
@@ -302,7 +302,7 @@ static int run_edge_unmapped(void)
         return 2;
     }
 
-    unsigned long long vaddr = (unsigned long long)(uintptr_t)region;
+    unsigned long long vaddr = (unsigned long long)((uintptr_t)region);
 
     munmap(region, base);
     region = NULL;
@@ -360,7 +360,7 @@ static void report_environment(void)
         struct pagewalker_result info;
 
         *(volatile unsigned long *)region = 1;
-        if (walk_vaddr(&info, (unsigned long long)(uintptr_t)region) == 0 &&
+        if (walk_vaddr(&info, (unsigned long long)((uintptr_t)region)) == 0 &&
             info.is_valid != 0) {
             printf("  paging      : %d-level, VA %u-bit, page %u KiB\n",
                    info.paging_level, info.va_bits, (1U << info.page_shift) / 1024);
