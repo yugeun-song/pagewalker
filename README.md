@@ -178,7 +178,8 @@ so they are git-ignored. `make clangd` needs `python3` and `bear`.
 ## Build
 
 ```bash
-make            # builds kernel/pagewalker.ko and user/pagewalkerctl
+make                    # builds kernel/pagewalker.ko and user/pagewalkerctl
+make -C user CC=clang   # the CLI alone, with Clang
 make clean
 ```
 
