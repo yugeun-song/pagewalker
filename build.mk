@@ -248,7 +248,7 @@ unused:
 	fi
 	@if command -v $(CPPCHECK) > /dev/null 2>&1; then \
 	    echo "=> unused (cppcheck): unusedFunction over $(call mk_count,$(MK_COMPDB_SRCS),source,sources)"; \
-	    $(CPPCHECK) --enable=unusedFunction --quiet $(CPPFLAGS_EXTRA) $(MK_UNUSED_DEFS) \
+	    $(CPPCHECK) --std=$(patsubst gnu%,c%,$(STD)) --enable=unusedFunction --quiet $(CPPFLAGS_EXTRA) $(MK_UNUSED_DEFS) \
 	        --template='{file}:{line}:{column}: {severity}: {message} [{id}]' $(MK_COMPDB_SRCS) 2>&1 | \
 	        grep '\[unusedFunction\]' || true; \
 	else \
