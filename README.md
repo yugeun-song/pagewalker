@@ -202,6 +202,17 @@ needs `python3` and `clang`. `.clangd` turns off clangd's unused-include check,
 which reads kernel symbols and glibc's `getopt_long()` as coming from the
 internal headers that define them and calls the public headers unused.
 
+## Coding style
+
+The code follows the
+[c-programming coding style](https://github.com/yugeun-song/c-programming/blob/main/docs/coding-style.en.md).
+`kernel/` and `include/` build into the kernel module and differ in two ways:
+
+- Indentation is the kernel's: hard tabs, 8 columns wide, with 8-column
+  continuation lines.
+- The kernel API keeps its own conventions where the style would contradict
+  them: `pr_fmt`, the kernel types (`u64`) and `-errno` returns.
+
 ## Build
 
 ```bash
