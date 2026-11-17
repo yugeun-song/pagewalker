@@ -199,8 +199,8 @@ static int compute_wcwidth(uint32_t code_point)
 void dump_bytes(FILE *const mut_out, const unsigned char *const bytes, size_t size, int is_cjk,
                 int cols, int group, int is_uppercase)
 {
-    const char *offset_format = (is_uppercase != 0) ? "%08llX  " : "%08llx  ";
-    const char *byte_format = (is_uppercase != 0) ? "%02X " : "%02x ";
+    const char *const offset_format = (is_uppercase != 0) ? "%08llX  " : "%08llx  ";
+    const char *const byte_format = (is_uppercase != 0) ? "%02X " : "%02x ";
     size_t skip = 0; /* CJK: leading bytes already consumed by a prior glyph */
 
     for (size_t offset = 0; offset < size; offset += (size_t)cols) {

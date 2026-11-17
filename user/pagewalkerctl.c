@@ -244,7 +244,7 @@ int main(int argc, char *argv[])
          * kernel only ever sees a (pid, address) pair.
          */
         {
-            const char *target = argv[optind + 1];
+            const char *const target = argv[optind + 1];
             const char *digits = target;
             int is_hex = target[0] != '\0';
 

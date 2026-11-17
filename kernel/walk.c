@@ -38,7 +38,7 @@
  * Linux 7.4 removed linux/hugetlb_inline.h and renamed is_vm_hugetlb_page() to
  * vma_is_hugetlb() in linux/mm.h.
  */
-static bool pw_vma_is_hugetlb(const struct vm_area_struct *vma)
+static bool pw_vma_is_hugetlb(const struct vm_area_struct *const vma)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 4, 0)
 	return vma_is_hugetlb(vma);
@@ -78,7 +78,7 @@ static void set_leaf(struct pagewalker_result *const mut_res, unsigned long vadd
 
 static struct folio *pw_pin_frame(u64 phys)
 {
-	struct page *page = pfn_to_online_page(PHYS_PFN(phys));
+	struct page *const page = pfn_to_online_page(PHYS_PFN(phys));
 	if (page == NULL) {
 		return NULL;
 	}
@@ -152,7 +152,7 @@ static void read_physical_content(struct pagewalker_result *const mut_res,
 		return;
 	}
 
-	void *kaddr = phys_to_virt(mut_res->final_phys_addr);
+	const void *const kaddr = phys_to_virt(mut_res->final_phys_addr);
 
 	/*
 	 * Fault-tolerant read: copy_from_kernel_nofault() probes the address
@@ -228,7 +228,7 @@ static const char *pw_walk_levels(struct pagewalker_result *const mut_res,
 	 * tables, so it skips this.
 	 */
 	if (mut_mm_nullable != NULL) {
-		struct vm_area_struct *vma = find_vma(mut_mm_nullable, vaddr);
+		const struct vm_area_struct *const vma = find_vma(mut_mm_nullable, vaddr);
 
 		if (vma == NULL || vaddr < vma->vm_start) {
 			return "no VMA covers this address";
@@ -244,7 +244,7 @@ static const char *pw_walk_levels(struct pagewalker_result *const mut_res,
 
 	mut_res->pgd_idx = pgd_index(vaddr);
 
-	pgd_t *pgd = pgd_root + pgd_index(vaddr);
+	pgd_t *const pgd = pgd_root + pgd_index(vaddr);
 	pgd_t pgde = pgdp_get(pgd);
 
 	mut_res->pgd_base_phys = virt_to_phys(pgd_root);
@@ -258,7 +258,7 @@ static const char *pw_walk_levels(struct pagewalker_result *const mut_res,
 
 	mut_res->p4d_idx = p4d_index(vaddr);
 
-	p4d_t *p4d = pw_get_p4d_slot(pgd, vaddr);
+	p4d_t *const p4d = pw_get_p4d_slot(pgd, vaddr);
 	p4d_t p4de = p4dp_get(p4d);
 
 	/*
@@ -311,7 +311,7 @@ static const char *pw_walk_levels(struct pagewalker_result *const mut_res,
 
 	mut_res->pud_idx = pud_index(vaddr);
 
-	pud_t *pud = pw_get_pud_slot(p4d, vaddr);
+	pud_t *const pud = pw_get_pud_slot(p4d, vaddr);
 	pud_t pude = pudp_get(pud);
 
 	if (mut_res->paging_level >= PAGING_LEVEL_4) {
@@ -367,7 +367,7 @@ static const char *pw_walk_levels(struct pagewalker_result *const mut_res,
 
 	mut_res->pmd_idx = pmd_index(vaddr);
 
-	pmd_t *pmd = pmd_offset(pud, vaddr);
+	pmd_t *const pmd = pmd_offset(pud, vaddr);
 	pmd_t pmde = pmdp_get_lockless(pmd);
 
 	mut_res->pmd_base_phys = pw_arch_extract_table_phys(pud_val(pude));
@@ -437,7 +437,7 @@ static const char *pw_walk_levels(struct pagewalker_result *const mut_res,
 		 * that serialises a zap of this PTE. 64-bit arches have no highmem,
 		 * so pte_offset_kernel() needs no kmap.
 		 */
-		spinlock_t *pmd_ptl = pmd_lock(mut_mm_nullable, pmd);
+		spinlock_t *const pmd_ptl = pmd_lock(mut_mm_nullable, pmd);
 
 		pmde = pmdp_get(pmd);
 		if (pmd_none(pmde) != 0 || pmd_leaf(pmde) || pmd_bad(pmde) != 0) {
@@ -445,13 +445,13 @@ static const char *pw_walk_levels(struct pagewalker_result *const mut_res,
 			return "PMD changed during walk (collapse race)";
 		}
 
-		spinlock_t *ptl = pte_lockptr(mut_mm_nullable, pmd);
+		spinlock_t *const ptl = pte_lockptr(mut_mm_nullable, pmd);
 
 		if (ptl != pmd_ptl) {
 			spin_lock_nested(ptl, SINGLE_DEPTH_NESTING);
 		}
 
-		pte_t *pte = pte_offset_kernel(pmd, vaddr);
+		pte_t *const pte = pte_offset_kernel(pmd, vaddr);
 
 		pte_entry = ptep_get(pte);
 		/* Read back the PTE slot while the lock still pins the table. */
@@ -466,7 +466,7 @@ static const char *pw_walk_levels(struct pagewalker_result *const mut_res,
 		spin_unlock(pmd_ptl);
 	} else {
 		/* Kernel walk: no collapse race, so read the leaf table directly. */
-		pte_t *pte = pte_offset_kernel(pmd, vaddr);
+		pte_t *const pte = pte_offset_kernel(pmd, vaddr);
 
 		pte_entry = ptep_get(pte);
 		mut_res->pte_readback = read_entry_phys(mut_res->pte_base_phys +
@@ -516,7 +516,7 @@ static const char *pw_walk_levels(struct pagewalker_result *const mut_res,
  */
 static int perform_kernel_walk(struct pagewalker_result *const mut_res)
 {
-	pgd_t *root = pw_arch_get_kernel_pgd();
+	pgd_t *const root = pw_arch_get_kernel_pgd();
 
 	pw_set_geometry(mut_res);
 
@@ -535,7 +535,7 @@ static int perform_kernel_walk(struct pagewalker_result *const mut_res)
 	}
 
 	struct folio *pin;
-	const char *reason = pw_walk_levels(mut_res, &pin, NULL, root);
+	const char *const reason = pw_walk_levels(mut_res, &pin, NULL, root);
 
 	pw_unpin(&pin);
 
@@ -606,7 +606,7 @@ int perform_page_walk(struct pagewalker_result *const mut_res, pid_t pid)
 	mmap_read_lock(mm);
 
 	struct folio *pin;
-	const char *reason = pw_walk_levels(mut_res, &pin, mm, mm->pgd);
+	const char *const reason = pw_walk_levels(mut_res, &pin, mm, mm->pgd);
 
 	if (mut_res->is_valid != 0) {
 		pr_info_ratelimited("pid %d vaddr 0x%lx -> phys 0x%llx [%s]\n",
@@ -732,7 +732,7 @@ int perform_read(struct pagewalker_read_request *const mut_req)
 	}
 
 	bool is_mmio_allowed = (mut_req->flags & PW_READ_F_ALLOW_MMIO) != 0;
-	u8 __user *dst = (u8 __user *)((uintptr_t)mut_req->ubuf);
+	u8 __user *const dst = (u8 __user *)((uintptr_t)mut_req->ubuf);
 
 	while (done < size) {
 		unsigned long cur = vaddr + done;

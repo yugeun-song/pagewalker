@@ -351,7 +351,7 @@ static void print_step(char *const mut_buf, int *const mut_offset, const char *c
                                         "  Flags       : %s\n", flags);
     }
 
-    const char *status = (is_valid_entry != 0) ? "Valid (Present)" : "Not Present / Empty";
+    const char *const status = (is_valid_entry != 0) ? "Valid (Present)" : "Not Present / Empty";
 
     *mut_offset += append_formatted(mut_buf + *mut_offset, BUFFER_SIZE - *mut_offset,
                                     "  Status      : %s\n\n", status);
@@ -469,7 +469,7 @@ static int emit_row(char *const mut_buf, int offset, const char *const label, in
 /* Format a byte count as an exact binary-unit string (e.g. "2 MiB", "64 KiB"). */
 void format_human_size(char *const mut_out, size_t cap, unsigned long long bytes)
 {
-    static const char *s_units[] = { "B", "KiB", "MiB", "GiB", "TiB" };
+    static const char *const s_units[] = { "B", "KiB", "MiB", "GiB", "TiB" };
     unsigned long long value = bytes;
     int unit = 0;
 
@@ -518,7 +518,7 @@ int build_report(char *const mut_buf, const struct pagewalker_result *const res,
 
     if (res->is_valid != 0 && res->is_contiguous == 0 && res->mapping_level != PW_LEAF_PTE &&
         res->mapping_level != PW_LEAF_NONE) {
-        const char *target = get_leaf_level_name(res->mapping_level);
+        const char *const target = get_leaf_level_name(res->mapping_level);
         int leaf_index;
 
         for (leaf_index = 0; leaf_index < level_count; ++leaf_index) {

@@ -65,7 +65,7 @@ static int find_elf_symbol(unsigned long long *const mut_st_value,
     if (elf_header->e_phoff != 0 && elf_header->e_phnum != 0 &&
         elf_header->e_phoff <= file_size &&
         (size_t)elf_header->e_phnum * sizeof(Elf64_Phdr) <= file_size - elf_header->e_phoff) {
-        const Elf64_Phdr *prog_headers = (const Elf64_Phdr *)(base + elf_header->e_phoff);
+        const Elf64_Phdr *const prog_headers = (const Elf64_Phdr *)(base + elf_header->e_phoff);
 
         for (size_t i = 0; i < elf_header->e_phnum; ++i) {
             if (prog_headers[i].p_type == PT_LOAD && prog_headers[i].p_offset == 0) {
@@ -82,7 +82,7 @@ static int find_elf_symbol(unsigned long long *const mut_st_value,
     }
 
     {
-        const Elf64_Shdr *sections = (const Elf64_Shdr *)(base + elf_header->e_shoff);
+        const Elf64_Shdr *const sections = (const Elf64_Shdr *)(base + elf_header->e_shoff);
 
         /* Pass 0: SHT_SYMTAB (full table); pass 1: SHT_DYNSYM (fallback). */
         for (int pass = 0; pass < 2 && has_found == 0; ++pass) {
@@ -104,8 +104,8 @@ static int find_elf_symbol(unsigned long long *const mut_st_value,
                     continue;
                 }
 
-                const Elf64_Sym *symbols = (const Elf64_Sym *)(base + sections[i].sh_offset);
-                const char *strtab = (const char *)(base + sections[strtab_index].sh_offset);
+                const Elf64_Sym *const symbols = (const Elf64_Sym *)(base + sections[i].sh_offset);
+                const char *const strtab = (const char *)(base + sections[strtab_index].sh_offset);
                 size_t strtab_size = sections[strtab_index].sh_size;
                 size_t symbol_count = sections[i].sh_size / sizeof(Elf64_Sym);
 
