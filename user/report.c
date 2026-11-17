@@ -535,15 +535,14 @@ int build_report(char *const mut_buf, const struct pagewalker_result *const res,
         if (leaf_index >= level_count) {
             leaf_index = 0;
         }
-        {
-            unsigned long long size = res->page_size;
 
-            shown_levels = leaf_index + 1;
-            offset_bits = 0;
-            while (size > 1) {
-                size >>= 1;
-                ++offset_bits;
-            }
+        unsigned long long size = res->page_size;
+
+        shown_levels = leaf_index + 1;
+        offset_bits = 0;
+        while (size > 1) {
+            size >>= 1;
+            ++offset_bits;
         }
     }
 

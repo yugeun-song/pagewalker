@@ -243,39 +243,38 @@ int main(int argc, char *argv[])
          * own objects. Resolution and its failure live here, in the CLI - the
          * kernel only ever sees a (pid, address) pair.
          */
-        {
-            const char *const target = argv[optind + 1];
-            const char *digits = target;
-            int is_hex = target[0] != '\0';
+        const char *const target = argv[optind + 1];
+        const char *digits = target;
+        int is_hex = target[0] != '\0';
 
-            if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) {
-                digits += 2;
-            }
-            if (*digits == '\0') {
+        if (digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) {
+            digits += 2;
+        }
+        if (*digits == '\0') {
+            is_hex = 0;
+        }
+        for (; *digits != '\0'; ++digits) {
+            if (isxdigit((unsigned char)*digits) == 0) {
                 is_hex = 0;
-            }
-            for (; *digits != '\0'; ++digits) {
-                if (isxdigit((unsigned char)*digits) == 0) {
-                    is_hex = 0;
-                    break;
-                }
-            }
-
-            if (is_hex != 0) {
-                if (parse_vaddr(&start, target) != 0) {
-                    fprintf(stderr, "Error: Invalid Address.\n");
-                    return EXIT_FAILURE;
-                }
-            } else {
-                char message[256];
-
-                if (resolve_user_sym(&start, message, sizeof(message), pid, target) != 0) {
-                    fprintf(stderr, "Error: %s\n", message);
-                    return EXIT_FAILURE;
-                }
-                fprintf(stderr, "resolved %s in PID %u -> 0x%llx\n", target, pid, start);
+                break;
             }
         }
+
+        if (is_hex != 0) {
+            if (parse_vaddr(&start, target) != 0) {
+                fprintf(stderr, "Error: Invalid Address.\n");
+                return EXIT_FAILURE;
+            }
+        } else {
+            char message[256];
+
+            if (resolve_user_sym(&start, message, sizeof(message), pid, target) != 0) {
+                fprintf(stderr, "Error: %s\n", message);
+                return EXIT_FAILURE;
+            }
+            fprintf(stderr, "resolved %s in PID %u -> 0x%llx\n", target, pid, start);
+        }
+
         if (operand_count == 3) {
             if (parse_size(&size, argv[optind + 2]) != 0) {
                 fprintf(stderr, "Error: invalid size '%s'.\n", argv[optind + 2]);

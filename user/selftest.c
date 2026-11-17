@@ -420,17 +420,16 @@ int main(void)
          * failed to open an initial console for PID 1; without this the report
          * would never reach the QEMU serial log.
          */
-        {
-            int console_fd = open("/dev/console", O_WRONLY);
+        int console_fd = open("/dev/console", O_WRONLY);
 
-            if (console_fd >= 0) {
-                dup2(console_fd, 1);
-                dup2(console_fd, 2);
-                if (console_fd > 2) {
-                    close(console_fd);
-                }
+        if (console_fd >= 0) {
+            dup2(console_fd, 1);
+            dup2(console_fd, 2);
+            if (console_fd > 2) {
+                close(console_fd);
             }
         }
+
         if (load_module("/pagewalker.ko") != 0) {
             printf("SELFTEST: finit_module(/pagewalker.ko) failed errno=%d\n", errno);
         } else {
