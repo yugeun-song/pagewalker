@@ -25,7 +25,7 @@ enum pagewalker_paging_level {
  * reach a present leaf.
  */
 enum pagewalker_leaf_level {
-	PW_LEAF_NONE,
+	PW_LEAF_NONE = 0,
 	PW_LEAF_PTE,
 	PW_LEAF_PMD,
 	PW_LEAF_PUD,
@@ -135,7 +135,7 @@ struct pagewalker_request {
 
 /* stopped reason (out) */
 enum pagewalker_stop_reason {
-	PW_STOP_OK, /* the whole run was copied */
+	PW_STOP_OK = 0, /* the whole run was copied */
 	PW_STOP_UNMAPPED, /* a page in the run is not mapped / not present */
 	PW_STOP_FAULT, /* a physical/kernel read faulted (hole, bad frame) */
 	PW_STOP_NONCANON, /* the start address is not representable on this arch */

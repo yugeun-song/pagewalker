@@ -13,7 +13,7 @@
 
 /* Output rendering for the byte dump, selected on the command line. */
 enum out_fmt {
-    FMT_HEX,
+    FMT_HEX = 0,
     FMT_RAW,
     FMT_CJK,
 };
